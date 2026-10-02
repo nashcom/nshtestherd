@@ -17,14 +17,22 @@ Trusted test network assumed: no authentication, no TLS.
 One executable, two modes:
 
 ```
-                 HTTP (public API, see docs/PROTOCOL.md)
-  nshtestherd  <--------------------------------------------  nshtestherd --runner
-  (server, default)      register / status / command           (optional worker host)
-   - account pool                                               - N logical clients
-   - clients, commands                                          - dummy job, or one child
-   - /metrics                                                     process per client
-        ^
-        |  any other HTTP client works the same way: Bash, k6, LotusScript, C/C++, curl
+  ┌──────────────────────┐            ┌────────────────────────────────┐                                  ┌────────────────────────────────┐
+  │  Prometheus          │            │  nshtestherd                   │                                  │  nshtestherd --runner          │
+  │                      │            │  server mode (default)         │ HTTP: register, status, command  │  optional worker host          │
+  │                      │    GET     │                                │      (see docs/PROTOCOL.md)      │                                │
+  │  scrapes /metrics    │ ──────────►│  • account pool                │◄──────────────────────────────── │  • N logical clients           │
+  │                      │            │  • clients and commands        │                                  │  • built-in dummy job, or      │
+  │                      │            │  • /metrics                    │                                  │    one child per client        │
+  │                      │            │                                │                                  │                                │
+  └──────────────────────┘            └────────────────┴───────────────┘                                  └────────────────────────────────┘
+                                                       ▲
+                                                       │
+                                                       │  any other HTTP client works the same way
+                                ┌──────────────────────┬─────────────────────┐
+                                │  Your own workers                          │
+                                │  Bash · k6 · LotusScript · C/C++ · curl    │
+                                └────────────────────────────────────────────┘
 ```
 
 ## Status
@@ -67,15 +75,15 @@ Full API with curl examples: [docs/PROTOCOL.md](docs/PROTOCOL.md). No compiler a
 
 ## Concepts
 
-| Term           | Meaning                                                                                                     |
-| -------------- | ----------------------------------------------------------------------------------------------------------- |
-| Account pool   | The imported (or generated) users, in order. Each account is handed out once.                               |
-| Client         | One registered worker. Gets the next free account and the next `test_id` (1, 2, 3, ...).                    |
-| `test_id`      | Sequential client number assigned by the server. Never reused during one run, independent of account names. |
-| `request_key`  | Optional opaque key a worker generates once and repeats on retries, so a retry returns the same allocation. |
-| Command        | What the coordinator wants a client to do: `idle`, `run <job>`, `pause <seconds>`, `stop`.                  |
-| `command_id`   | Counts accepted command updates per client. Workers apply each id exactly once.                             |
-| Reported state | What the worker says it is doing. Separate from the desired command.                                        |
+| Term           | Meaning                                                                                        |
+| -------------- | ---------------------------------------------------------------------------------------------- |
+| Account pool   | The imported or generated users, in order. Each account is handed out once.                    |
+| Client         | One registered worker: the next free account plus the next `test_id` (1, 2, 3, ...).           |
+| `test_id`      | Sequential client number from the server. Never reused in one run; unrelated to account names. |
+| `request_key`  | Optional key a worker generates once and repeats on retries: the same allocation comes back.   |
+| Command        | What the coordinator wants: `idle`, `run <job>`, `pause <seconds>`, `stop`.                    |
+| `command_id`   | Counts accepted command updates per client. Workers apply each id exactly once.                |
+| Reported state | What the worker says it is doing. Separate from the desired command.                           |
 
 Client lifecycle (reported states):
 
@@ -123,11 +131,11 @@ The version lives in one place: `NSHTESTHERD_VERSION` in [src/version.h](src/ver
 `./nshtestherd --version` prints and what the server shows in its startup line. `version.txt` is a convenience copy
 (anyone can read the latest released version without parsing the header); it plays no part in the build.
 
-| Step                                 | What happens                                                                                                                                           |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Push or pull request                 | `ci.yml`: `make`, `make test`, `tests/integration.sh` on Ubuntu                                                                                        |
-| `./push-release.sh`                  | Writes `version.txt` from `version.h` (commits and pushes it if it changed), then re-tags and pushes `vX.Y.Z`                                          |
-| Publish a GitHub release for the tag | `release.yml`: static Alpine/musl builds for amd64 and arm64, uploads `nshtestherd-<version>-<arch>` plus `.sha256`, pushes a multi-arch image to GHCR |
+| Step                 | What happens                                                                                |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| Push or pull request | `ci.yml`: `make`, `make test`, `tests/integration.sh` on Ubuntu                             |
+| `./push-release.sh`  | Updates `version.txt` (commits it if changed), re-tags and pushes `vX.Y.Z`                  |
+| Publish a release    | `release.yml`: static amd64 and arm64 binaries (+ `.sha256`) and a multi-arch image on GHCR |
 
 To release: change `NSHTESTHERD_VERSION`, commit, run `./push-release.sh`, then publish the release for the new tag on GitHub.
 
@@ -213,10 +221,10 @@ curl http://127.0.0.1:8788/metrics
 docker compose logs -f runner
 ```
 
-| Service  | What it does                                                                                             | Profile | Restart policy |
-| -------- | -------------------------------------------------------------------------------------------------------- | ------- | -------------- |
-| `herd`   | The coordinator: `--bind 0.0.0.0 --port <HERD_PORT> --generate <HERD_USERS>`, port published on the host | (none)  | `always`       |
-| `runner` | `--runner --server http://herd:<HERD_PORT> --clients <RUNNER_CLIENTS>`, reaches the herd by service name | `test`  | `no`           |
+| Service  | What it does                                                                   | Profile | Restart policy |
+| -------- | ------------------------------------------------------------------------------ | ------- | -------------- |
+| `herd`   | Coordinator: `--bind 0.0.0.0 --port --generate`, port published on the host    | (none)  | `always`       |
+| `runner` | `--runner --server http://herd:<port> --clients <n>`, reaches the herd by name | `test`  | `no`           |
 
 The herd always comes back after a Docker or host restart (but a restarted herd is a fresh herd, see below). The runner is
 not restarted automatically: a finished runner (stop command) or a failed one would otherwise register a new set of clients
@@ -224,13 +232,13 @@ and use up accounts.
 
 Settings, from the shell environment or a `.env` file next to `docker-compose.yml`:
 
-| Variable            | Default              | Meaning                                                                                 |
-| ------------------- | -------------------- | --------------------------------------------------------------------------------------- |
-| `HERD_USERS`        | `100`                | Generated accounts (`load000001` ...). The pool is bounded.                             |
-| `RUNNER_CLIENTS`    | `10`                 | Logical clients per runner container.                                                   |
-| `HERD_PORT`         | `8788`               | Port, on the host and in the container.                                                 |
-| `HERD_BIND`         | `127.0.0.1`          | Host address the port is published on. `0.0.0.0` exposes it to the network (see below). |
-| `NSHTESTHERD_IMAGE` | `nshtestherd:latest` | Image name. The default is built locally; set it to use the published image.            |
+| Variable            | Default              | Meaning                                                          |
+| ------------------- | -------------------- | ---------------------------------------------------------------- |
+| `HERD_USERS`        | `100`                | Generated accounts (`load000001` ...); the pool is bounded       |
+| `RUNNER_CLIENTS`    | `10`                 | Logical clients per runner container                             |
+| `HERD_PORT`         | `8788`               | Port, on the host and in the container                           |
+| `HERD_BIND`         | `127.0.0.1`          | Host address the port is published on (`0.0.0.0`: whole network) |
+| `NSHTESTHERD_IMAGE` | `nshtestherd:latest` | Image name (default: built locally; or the published image)      |
 
 ```bash
 HERD_USERS=500 RUNNER_CLIENTS=50 docker compose --profile test up -d --build
@@ -288,14 +296,14 @@ lose their clients, so restart or recreate the runners with it: `docker compose 
 stopped cleanly with `curl -X POST -d 'target=all&command=stop' http://127.0.0.1:8788/command`: the clients report `done`
 and the runner container exits with code 0.
 
-| Symptom                                            | Cause / fix                                                                                         |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Runner exits at once with "no free account left"   | `HERD_USERS` is smaller than the clients requested (all runners together). Raise `HERD_USERS`.      |
-| Runner log: "coordinator unreachable"              | The herd is not up yet or `HERD_PORT` differs between the two services; check `docker compose ps`.  |
-| Port already in use on `up`                        | Another service uses the port; set `HERD_PORT`.                                                     |
-| `docker compose up` starts no runner               | By design: the runner is in the `test` profile. Use `--profile test` or `docker compose up runner`. |
-| Runner on another machine cannot connect           | The herd is published on `127.0.0.1` only; start it with `HERD_BIND=0.0.0.0`.                       |
-| `docker compose` shows the herd as running, but... | There is no container healthcheck (scratch image); test with `curl http://127.0.0.1:8788/health`.   |
+| Symptom                                      | Cause / fix                                                          |
+| -------------------------------------------- | -------------------------------------------------------------------- |
+| Runner exits at once: "no free account left" | `HERD_USERS` is smaller than all runners' clients together; raise it |
+| Runner: "coordinator unreachable"            | Herd not up yet, or `HERD_PORT` differs; check `docker compose ps`   |
+| Port already in use on `up`                  | Another service uses the port; set a different `HERD_PORT`           |
+| `docker compose up` starts no runner         | By design (profile `test`): use `--profile test` or `up runner`      |
+| Runner on another machine cannot connect     | Herd is published on `127.0.0.1` only; use `HERD_BIND=0.0.0.0`       |
+| Herd "running" but not answering             | No container healthcheck; try `curl http://127.0.0.1:8788/health`    |
 
 **Running a real load program from the runner.** The base image contains nothing except `nshtestherd`, so a load program must
 be added in a derived image, and it has to run in that image (a static binary, or add the libraries it needs):
@@ -303,17 +311,17 @@ be added in a derived image, and it has to run in that image (a static binary, o
 ```dockerfile
 FROM alpine:latest
 COPY --from=ghcr.io/nashcom/nshtestherd:latest /nshtestherd /usr/local/bin/nshtestherd
-COPY nshload /usr/local/bin/nshload
+COPY mytests /usr/local/bin/mytests
 USER 1000:1000
 ENTRYPOINT ["/usr/local/bin/nshtestherd"]
 ```
 
 ```bash
 docker run --rm --network herdnet my-runner --runner --server http://herd:8788 --clients 10 \
-  --program /usr/local/bin/nshload -- --config /etc/load.ini
+  --program /usr/local/bin/mytests -- --config /etc/mytests.ini
 ```
 
-The runner passes the account to each `nshload` process in `NSH_*` environment variables (see [Runner](#runner-optional)).
+The runner passes the account to each `mytests` process in `NSH_*` environment variables (see [Runner](#runner-optional)).
 
 **Security.** There is no authentication or TLS, and `/register` returns the account passwords. Publish the port only
 on a trusted test network (for example `-p 127.0.0.1:8788:8788` when only local tools need it).
@@ -336,20 +344,20 @@ lacks), and the `scratch` stage copies in just the binary.
 Starting without accounts is valid: registration returns 409 `no_accounts_loaded` until accounts arrive
 (`--csv`, `--generate`, or `POST /load`).
 
-| Option                | Default        | Meaning                                                                                                                                        |
-| --------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--bind <ipv4>`       | `127.0.0.1`    | Listen address (IPv4 literal). Use `0.0.0.0` for remote workers.                                                                               |
-| `--port <n>`          | `8788`         | Listen port.                                                                                                                                   |
-| `--csv <file>`        | none           | Load accounts at startup.                                                                                                                      |
-| `--generate <n>`      | none           | No CSV: simulate one with `n` accounts (1-1000000), e.g. `Load,000001,TestPassword,load000001,load000001@example.com`. Exclusive with `--csv`. |
-| `--prefix <name>`     | `load`         | Generated shortname/mail prefix (first letter upper-cased becomes FirstName). Needs `--generate`.                                              |
-| `--password <pw>`     | `TestPassword` | Generated password. Needs `--generate`.                                                                                                        |
-| `--domain <name>`     | `example.com`  | Generated mail domain. Needs `--generate`.                                                                                                     |
-| `--threads <n>`       | `8`            | Worker threads. Up to 64 accepted connections wait in a queue; beyond that clients get 503.                                                    |
-| `--max-csv-bytes <n>` | `16777216`     | Body limit for `POST /load`. All other bodies are limited to 64 KB, headers to 16 KB (413).                                                    |
-| `--timeout <s>`       | `10`           | Socket timeout and total deadline for reading one request.                                                                                     |
-| `--verbose`           | off            | One log line per request: method, path, status and `test_id` when known (e.g. `POST /status 200 test_id=3`). Bodies are never logged.          |
-| `--version`, `--help` |                | Print version / usage.                                                                                                                         |
+| Option                | Default        | Meaning                                                               |
+| --------------------- | -------------- | --------------------------------------------------------------------- |
+| `--bind <ipv4>`       | `127.0.0.1`    | Listen address (IPv4). `0.0.0.0` for remote workers                   |
+| `--port <n>`          | `8788`         | Listen port                                                           |
+| `--csv <file>`        | none           | Load accounts at startup                                              |
+| `--generate <n>`      | none           | No CSV: generate `n` accounts (1-1000000); not with `--csv`           |
+| `--prefix <name>`     | `load`         | Generated name prefix (`load000001`); needs `--generate`              |
+| `--password <pw>`     | `TestPassword` | Generated password; needs `--generate`                                |
+| `--domain <name>`     | `example.com`  | Generated mail domain; needs `--generate`                             |
+| `--threads <n>`       | `8`            | Worker threads; 64 more connections may wait, then 503                |
+| `--max-csv-bytes <n>` | `16777216`     | Size limit for `POST /load` (other bodies 64 KB, headers 16 KB)       |
+| `--timeout <s>`       | `10`           | Socket timeout and deadline for reading one request                   |
+| `--verbose`           | off            | Log one line per request (method, path, status, `test_id`); no bodies |
+| `--version`, `--help` |                | Print version / usage                                                 |
 
 Exit codes: 0 normal stop, 1 startup failure (cannot bind, CSV unreadable or invalid, worker threads cannot be started), 2 usage error.
 
@@ -402,19 +410,19 @@ nshtestherd --runner --server http://coordinator:8788                     # up t
 nshtestherd --runner --server http://coordinator:8788 --clients 100       # exactly 100 (per machine), built-in dummy job
 nshtestherd --runner --server http://coordinator:8788 --clients all       # one client per free account (max 1000), single runner
 nshtestherd --runner --server http://coordinator:8788 --clients 100 \
-  --program nshload -- --config load.ini                                  # external program
+  --program mytests -- --config mytests.ini                                  # external program
 ```
 
-| Option               | Default                 | Meaning                                                                                    |
-| -------------------- | ----------------------- | ------------------------------------------------------------------------------------------ |
-| `--runner`           |                         | Select runner mode.                                                                        |
-| `--server <url>`     | `http://127.0.0.1:8788` | Coordinator, `http://host[:port]` (no https).                                              |
-| `--clients <n\|all>` | up to `--max-clients`   | Exactly `n` clients (max 1000), or `all` = keep going until the pool is booked (max 1000). |
-| `--max-clients <n>`  | `100`                   | Limit for the default mode. Not allowed together with `--clients`.                         |
-| `--program <exe>`    | none (dummy job)        | Run this program once per client and `run` command.                                        |
-| `-- <args...>`       |                         | Arguments passed unchanged to every launched program. Requires `--program`.                |
-| `--poll-seconds <n>` | `2`                     | Status polling interval.                                                                   |
-| `--verbose`          | off                     | Accepted for symmetry; the runner always logs its key events.                              |
+| Option               | Default                 | Meaning                                                         |
+| -------------------- | ----------------------- | --------------------------------------------------------------- |
+| `--runner`           |                         | Select runner mode                                              |
+| `--server <url>`     | `http://127.0.0.1:8788` | Coordinator, `http://host[:port]` (no https)                    |
+| `--clients <n\|all>` | up to `--max-clients`   | Exactly `n` (max 1000), or `all`: until the pool is booked      |
+| `--max-clients <n>`  | `100`                   | Limit for the default mode; not with `--clients`                |
+| `--program <exe>`    | none (dummy job)        | Start this program once per client and `run` command            |
+| `-- <args...>`       |                         | Arguments passed unchanged to every program (needs `--program`) |
+| `--poll-seconds <n>` | `2`                     | Status polling interval                                         |
+| `--verbose`          | off                     | Accepted for symmetry; the runner always logs key events        |
 
 Server options (`--bind --port --csv --generate --prefix --password --domain --threads --max-csv-bytes --timeout`)
 and runner options cannot be mixed. Exit codes: 0 no client failed, 1 at least one client failed (error, refused
@@ -491,16 +499,15 @@ curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
 
 ## Troubleshooting
 
-| Symptom                                           | Cause / fix                                                                                       |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Registration returns 409 `no_accounts_loaded`     | No pool yet. Start with `--csv` / `--generate` or `POST /load`. Runners wait and retry.           |
-| Registration returns 409 `pool_exhausted`         | Every account is booked. Restart the server for a fresh herd, or load a larger pool first.        |
-| `POST /load` returns 409 `load_not_allowed`       | A client has already registered. Restart the server to load a different pool.                     |
-| Runner: "coordinator no longer knows this client" | The server was restarted. Stop the old runners before restarting the server.                      |
-| Runner: "coordinator unreachable"                 | Wrong `--server`, server down, or `--bind` is `127.0.0.1` while the runner is on another machine. |
-| 503 from the server                               | More than 64 connections waiting. Raise `--threads` or poll less often.                           |
-| 413                                               | Request too large (64 KB general, `--max-csv-bytes` for `/load`).                                 |
-| Client stays in `error`                           | A child exited non-zero or could not be started; see its `message` in `GET /client?test_id=N`.    |
+| Symptom                               | Cause / fix                                                               |
+| ------------------------------------- | ------------------------------------------------------------------------- |
+| Registration 409 `no_accounts_loaded` | No pool yet: use `--csv` / `--generate` or `POST /load`; runners wait     |
+| Registration 409 `pool_exhausted`     | All accounts booked: restart the server, or load a larger pool            |
+| `POST /load` 409 `load_not_allowed`   | A client already registered: restart the server to load another pool      |
+| Runner: "no longer knows this client" | The server was restarted: stop old runners before restarting it           |
+| Runner: "coordinator unreachable"     | Wrong `--server`, server down, or `--bind 127.0.0.1` with a remote runner |
+| 503 from the server                   | More than 64 waiting connections: raise `--threads` or poll less often    |
+| 413                                   | Request too large (64 KB; `--max-csv-bytes` for `/load`)                  |
 
 ## Limits and non-goals
 
@@ -517,14 +524,21 @@ make test                            # builds and runs test_core and test_runner
 tests/integration.sh ./nshtestherd   # HTTP layer with curl (default port 18788, set HERD_TEST_PORT)
 ```
 
-| Test             | What it covers                                                                                                                                                                                                                                                                                                      |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `test_core`      | CSV quoting and rollback, wire format, `--generate`, allocation and retry keys, exhaustion, 16-thread concurrency, commands vs. state, metrics (no sockets)                                                                                                                                                         |
-| `test_runner`    | Runner against an in-process coordinator on `127.0.0.1:18790` (`HERD_TEST_PORT`; skipped if busy): dummy clients, fill mode and cap, `/bin/sh` child, failing job, missing program, self-child (`--child-info`), reply framing (truncated and chunked replies rejected), a SIGTERM-ignoring child killed and reaped |
-| `integration.sh` | Real HTTP: limits (413), methods (405), chunked (501), CSV over the wire, retry keys, metrics, clean shutdown                                                                                                                                                                                                       |
+| Test             | What it covers                                                                         |
+| ---------------- | -------------------------------------------------------------------------------------- |
+| `test_core`      | CSV, wire format, `--generate`, allocation, exhaustion, concurrency, commands, metrics |
+| `test_runner`    | Runner against an in-process coordinator: dummy clients, fill and cap, child programs  |
+| `integration.sh` | Real HTTP with curl: limits, methods, CSV, retry keys, metrics, shutdown               |
+
+`test_runner` scenarios: dummy clients, fill mode and client cap, a `/bin/sh` child with a failing job, a program that
+cannot be started, the self-child (`--child-info`), reply framing (truncated and chunked replies are rejected) and a
+child that ignores SIGTERM (killed and reaped). It uses `127.0.0.1:18790` (`HERD_TEST_PORT`) and is skipped if that
+port is busy.
 
 `test_core`, `test_runner` and `integration.sh` are not part of the product binary.
-All three use the standard section headers (a 90-character rule above and below the title). Each test prints one result line and the final summary is a line starting with `[ OK ]` or `[ FAIL ]` (a failing check also prints `[ FAIL ] file:line: condition`).
+All three use the standard section headers (a 90-character rule above and below the title). Each test prints one result
+line, and the final summary line starts with `[ OK ]` or `[ FAIL ]` (a failing check also prints
+`[ FAIL ] file:line: condition`).
 `test_runner` shows what to expect under each test name, and the runner's own log lines appear in between. Two
 scenarios fail **on purpose** (a job that exits 1, a program that cannot be started), so `1 failed` in the runner log
 there is the expected result. Only a `[ FAIL ]` line or a non-zero exit of `make test` means a problem.

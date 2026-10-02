@@ -327,12 +327,14 @@ An unknown `test_id` returns 404 `unknown_test_id`.
 
 Either `test_id=N` (one client) or `target=all` (every client that exists now and has not finished), plus `command`:
 
-| command | Fields                     | Worker behaviour                                                                                                        |
-| ------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `idle`  | none                       | Stay alive, no load, keep polling                                                                                       |
-| `run`   | `job`                      | Start/continue the named workload. `job`: 1-128 chars of `A-Z a-z 0-9 . _ : / -`. A workload name, not a shell command. |
-| `pause` | `pause_seconds` 1-31536000 | Pause for that duration, keep polling, resume the previous run/idle state afterwards unless superseded                  |
-| `stop`  | none                       | Finish the current operation, report `done`, exit                                                                       |
+| command | Fields                     | Worker behaviour                                                   |
+| ------- | -------------------------- | ------------------------------------------------------------------ |
+| `idle`  | none                       | Stay alive, no load, keep polling                                  |
+| `run`   | `job`                      | Start or continue the named workload (a name, not a shell command) |
+| `pause` | `pause_seconds` 1-31536000 | Pause that long, keep polling, then resume the previous state      |
+| `stop`  | none                       | Finish the current operation, report `done`, exit                  |
+
+`job` is 1-128 characters of `A-Z a-z 0-9 . _ : / -`.
 
 ```bash
 curl -X POST -d 'target=all&command=run&job=mail-read'     http://127.0.0.1:8788/command
@@ -402,20 +404,20 @@ nshtestherd_clients_by_state{state="error"} 0
 
 Prefix `nshtestherd_`, content type `text/plain; version=0.0.4`.
 
-| Metric                                                                           | Type    | Meaning                                |
-| -------------------------------------------------------------------------------- | ------- | -------------------------------------- |
-| `users_total`                                                                    | gauge   | Accounts in the pool                   |
-| `users_available`                                                                | gauge   | Accounts not yet allocated             |
-| `users_allocated`                                                                | gauge   | Accounts allocated to clients          |
-| `clients_total`                                                                  | gauge   | Registered clients                     |
-| `uptime_seconds`                                                                 | gauge   | Seconds since the coordinator started  |
-| `clients_by_state{state="registered"}` ... `{state="error"}` (all seven, always) | gauge   | Clients by last reported state         |
-| `registrations_total`                                                            | counter | New allocations only                   |
-| `allocation_failures_total`                                                      | counter | Registrations refused, no account left |
-| `status_reports_total`                                                           | counter | Accepted status reports                |
-| `command_updates_total`                                                          | counter | Command updates, per affected client   |
-| `csv_loads_total`                                                                | counter | Successful account imports             |
-| `csv_load_failures_total`                                                        | counter | Rejected account imports               |
+| Metric                          | Type    | Meaning                                                   |
+| ------------------------------- | ------- | --------------------------------------------------------- |
+| `users_total`                   | gauge   | Accounts in the pool                                      |
+| `users_available`               | gauge   | Accounts not yet allocated                                |
+| `users_allocated`               | gauge   | Accounts allocated to clients                             |
+| `clients_total`                 | gauge   | Registered clients                                        |
+| `uptime_seconds`                | gauge   | Seconds since the coordinator started                     |
+| `clients_by_state{state="..."}` | gauge   | Clients by last reported state (all seven states, always) |
+| `registrations_total`           | counter | New allocations only                                      |
+| `allocation_failures_total`     | counter | Registrations refused, no account left                    |
+| `status_reports_total`          | counter | Accepted status reports                                   |
+| `command_updates_total`         | counter | Command updates, per affected client                      |
+| `csv_loads_total`               | counter | Successful account imports                                |
+| `csv_load_failures_total`       | counter | Rejected account imports                                  |
 
 State label values: `registered`, `idle`, `running`, `paused`, `stopping`, `done`, `error`. No test ids, names,
 addresses, keys, messages or job names appear as labels.
