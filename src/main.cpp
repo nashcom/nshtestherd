@@ -5,6 +5,7 @@
 #include "platform.h"
 #include "process.h"
 #include "runner.h"
+#include "version.h"
 #include "wire.h"
 
 #include <atomic>
@@ -23,7 +24,6 @@
 #include <windows.h>
 #endif
 
-#define NSH_VERSION "1.1.0"
 
 namespace
 {
@@ -77,7 +77,7 @@ void Usage()
         "Both modes:\n"
         "  --verbose             server: log one line per request: method, path, status, test_id (never bodies)\n"
         "  --version, --help\n",
-        NSH_VERSION);
+        NSHTESTHERD_VERSION);
 }
 
 bool ReadFile(const std::string &path, std::string &content)
@@ -225,7 +225,7 @@ int RunServer(const ServerConfig &config, const std::string &csvPath, const Gene
     std::signal(SIGINT, OnSignal);
     std::signal(SIGTERM, OnSignal);
 
-    std::printf("nshtestherd %s listening on %s:%d (Ctrl+C to stop)\n", NSH_VERSION, config.bindAddress.c_str(), config.port);
+    std::printf("nshtestherd %s listening on %s:%d (Ctrl+C to stop)\n", NSHTESTHERD_VERSION, config.bindAddress.c_str(), config.port);
     std::fflush(stdout);
 
     bool ok = server.Run();
@@ -323,7 +323,7 @@ int main(int argc, char **argv)
         }
         else if ("--version" == arg)
         {
-            std::printf("nshtestherd %s\n", NSH_VERSION);
+            std::printf("nshtestherd %s\n", NSHTESTHERD_VERSION);
             return 0;
         }
         else if ("--verbose" == arg)

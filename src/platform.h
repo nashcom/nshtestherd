@@ -70,6 +70,43 @@ inline bool SockConnectInProgress()
     return WSAEWOULDBLOCK == WSAGetLastError();
 }
 
+// True when the socket becomes readable (a connection is waiting) within ms.
+inline bool SockWaitReadable(SocketHandle s, int ms)
+{
+    fd_set readSet;
+    FD_ZERO(&readSet);
+    FD_SET(s, &readSet);
+
+    struct timeval tv;
+    tv.tv_sec  = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+
+    return select(0, &readSet, NULL, NULL, &tv) > 0;
+}
+
+// True when a non-blocking connect() finished successfully within the timeout.
+inline bool SockWaitConnected(SocketHandle s, int seconds)
+{
+    fd_set writeSet;
+    fd_set errorSet;
+    FD_ZERO(&writeSet);
+    FD_ZERO(&errorSet);
+    FD_SET(s, &writeSet);
+    FD_SET(s, &errorSet);
+
+    struct timeval tv;
+    tv.tv_sec  = seconds;
+    tv.tv_usec = 0;
+
+    if (select(0, NULL, &writeSet, &errorSet, &tv) <= 0)
+        return false;
+
+    int       soError = 0;
+    socklen_t len     = sizeof(soError);
+
+    return (0 == getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&soError, &len)) && (0 == soError);
+}
+
 #else
 
 #include <arpa/inet.h>
@@ -79,6 +116,7 @@ inline bool SockConnectInProgress()
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -131,6 +169,44 @@ inline void SockSetBlocking(SocketHandle s, bool blocking)
 {
     int flags = fcntl(s, F_GETFL, 0);
     fcntl(s, F_SETFL, blocking ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK));
+}
+
+// poll() instead of select(): select() is undefined for descriptors >= FD_SETSIZE (1024),
+// which a runner with hundreds of clients can reach. (It also keeps the static musl
+// link free of glibc's __fdelt_chk fortify symbol.)
+inline int SockPoll(SocketHandle s, short events, int ms)
+{
+    struct pollfd p;
+    p.fd      = s;
+    p.events  = events;
+    p.revents = 0;
+
+    int r;
+
+    do
+    {
+        r = poll(&p, 1, ms);
+    } while (r < 0 && EINTR == errno);
+
+    return r;
+}
+
+// True when the socket becomes readable (a connection is waiting) within ms.
+inline bool SockWaitReadable(SocketHandle s, int ms)
+{
+    return SockPoll(s, POLLIN, ms) > 0;
+}
+
+// True when a non-blocking connect() finished successfully within the timeout.
+inline bool SockWaitConnected(SocketHandle s, int seconds)
+{
+    if (SockPoll(s, POLLOUT, seconds * 1000) <= 0)
+        return false;
+
+    int       soError = 0;
+    socklen_t len     = sizeof(soError);
+
+    return (0 == getsockopt(s, SOL_SOCKET, SO_ERROR, &soError, &len)) && (0 == soError);
 }
 
 inline bool SockConnectInProgress()

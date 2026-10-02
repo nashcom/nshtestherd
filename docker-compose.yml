@@ -1,0 +1,82 @@
+# nshtestherd stack: the coordinator ("herd") and, as an optional test tool, a runner.
+#
+# The herd is the product and starts by default. The runner is in the "test" profile:
+# it only starts when you ask for it.
+#
+#   docker compose up -d --build                    # the herd only (use your own workers)
+#   docker compose --profile test up --build        # the herd and a runner
+#   docker compose up runner                        # naming the runner starts it (and the herd)
+#   docker compose --profile test up --scale runner=3   # three runners, RUNNER_CLIENTS clients each
+#   docker compose logs -f runner
+#   docker compose --profile test down              # stop everything, including the runner
+#
+# Settings (shell environment or a .env file next to this file):
+#   NSHTESTHERD_IMAGE image to use                             (default nshtestherd:latest, built here)
+#                    e.g. ghcr.io/nashcom/nshtestherd:latest, then: docker compose pull && docker compose up -d
+#   HERD_BIND        host address the port is published on   (default 127.0.0.1)
+#   HERD_PORT        port, on the host and in the container   (default 8788)
+#   HERD_USERS       generated accounts: load000001, load000002, ...  (default 100)
+#   RUNNER_CLIENTS   logical clients per runner               (default 10)
+#
+# Accounts: this file uses --generate. To use your own users instead, replace the
+# "--generate" line in the herd command with the two lines marked "own accounts"
+# and mount the CSV (see the volumes section).
+#
+# A restarted herd starts a fresh herd (client numbering from 1, all accounts free)
+# and its runners lose their clients: restart the runners together with the herd.
+
+services:
+
+  herd:
+    build:
+      context: .
+    image: ${NSHTESTHERD_IMAGE:-nshtestherd:latest}
+    container_name: nshtestherd
+    hostname: nshtestherd
+    restart: always
+
+    command:
+      - "--bind"
+      - "0.0.0.0"
+      - "--port"
+      - "${HERD_PORT:-8788}"
+      - "--generate"
+      - "${HERD_USERS:-100}"
+      # own accounts:
+      # - "--csv"
+      # - "/users.csv"
+
+    ports:
+      - "${HERD_BIND:-127.0.0.1}:${HERD_PORT:-8788}:${HERD_PORT:-8788}"
+
+    # own accounts:
+    # volumes:
+    #   - ./users.csv:/users.csv:ro
+
+  runner:
+    build:
+      context: .
+    image: ${NSHTESTHERD_IMAGE:-nshtestherd:latest}
+    hostname: nshtestherd-runner
+
+    # Test tool: not started by a plain "docker compose up"
+    profiles: ["test"]
+
+    # A runner that has finished (stop command) or failed must not be restarted
+    # automatically: it would register a new set of clients and use up accounts.
+    restart: "no"
+
+    depends_on:
+      - herd
+
+    command:
+      - "--runner"
+      - "--server"
+      - "http://herd:${HERD_PORT:-8788}"
+      - "--clients"
+      - "${RUNNER_CLIENTS:-10}"
+      # smoke test: run nshtestherd itself as the child program (prints its pid)
+      # - "--program"
+      # - "/nshtestherd"
+      # - "--"
+      # - "--child-info"

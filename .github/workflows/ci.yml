@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Build
+        run: make
+
+      - name: Version
+        run: ./nshtestherd --version
+
+      # test_core (logic, no sockets) and test_runner (runner against an in-process
+      # coordinator on 127.0.0.1:18790, including the self-child test)
+      - name: Unit tests
+        run: make test
+
+      # The real HTTP layer with curl (default port 18788)
+      - name: Integration tests
+        run: bash tests/integration.sh ./nshtestherd

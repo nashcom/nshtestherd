@@ -42,26 +42,7 @@ SocketHandle ConnectTo(const HttpUrl &url, int timeoutSeconds, std::string &err)
         bool connected = (0 == connect(candidate, ai->ai_addr, (int)ai->ai_addrlen));
 
         if (!connected && SockConnectInProgress())
-        {
-            fd_set writeSet;
-            fd_set errorSet;
-            FD_ZERO(&writeSet);
-            FD_ZERO(&errorSet);
-            FD_SET(candidate, &writeSet);
-            FD_SET(candidate, &errorSet);
-
-            struct timeval tv;
-            tv.tv_sec  = timeoutSeconds;
-            tv.tv_usec = 0;
-
-            if (select((int)candidate + 1, NULL, &writeSet, &errorSet, &tv) > 0)
-            {
-                int       soError = 0;
-                socklen_t len     = sizeof(soError);
-
-                connected = (0 == getsockopt(candidate, SOL_SOCKET, SO_ERROR, (char *)&soError, &len)) && (0 == soError);
-            }
-        }
+            connected = SockWaitConnected(candidate, timeoutSeconds);
 
         if (!connected)
         {

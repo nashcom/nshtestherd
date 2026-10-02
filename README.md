@@ -63,7 +63,7 @@ Server and runner in two windows (no external program needed):
 curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
 ```
 
-Full API with curl examples: [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Full API with curl examples: [docs/PROTOCOL.md](docs/PROTOCOL.md). No compiler at hand? Use the [container image](#container-image) or the static binary from the GitHub release.
 
 ## Concepts
 
@@ -116,6 +116,219 @@ cl /std:c++17 /EHsc /O2 /Fe:nshtestherd.exe src\main.cpp src\http.cpp src\runner
 # Windows (MinGW)
 g++ -std=c++17 -O2 -o nshtestherd.exe src/main.cpp src/http.cpp src/runner.cpp src/httpclient.cpp src/process.cpp src/api.cpp src/herd.cpp src/csv.cpp src/wire.cpp -lws2_32 -lshell32 -pthread
 ```
+
+## Versions, releases and Docker
+
+The version lives in one place: `NSHTESTHERD_VERSION` in [src/version.h](src/version.h) (currently `0.9.0`). It is what
+`./nshtestherd --version` prints and what the server shows in its startup line. `version.txt` is a convenience copy
+(anyone can read the latest released version without parsing the header); it plays no part in the build.
+
+| Step                                 | What happens                                                                                                                                           |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Push or pull request                 | `ci.yml`: `make`, `make test`, `tests/integration.sh` on Ubuntu                                                                                        |
+| `./push-release.sh`                  | Writes `version.txt` from `version.h` (commits and pushes it if it changed), then re-tags and pushes `vX.Y.Z`                                          |
+| Publish a GitHub release for the tag | `release.yml`: static Alpine/musl builds for amd64 and arm64, uploads `nshtestherd-<version>-<arch>` plus `.sha256`, pushes a multi-arch image to GHCR |
+
+To release: change `NSHTESTHERD_VERSION`, commit, run `./push-release.sh`, then publish the release for the new tag on GitHub.
+
+Only the `nshtestherd` binary is a deliverable. The test programs are built by `make test` and CI only; they are not in the
+release assets or in the image.
+
+### Container image
+
+The release workflow publishes a multi-arch image (linux/amd64 and linux/arm64) to the GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/nashcom/nshtestherd:latest     # newest release
+docker pull ghcr.io/nashcom/nshtestherd:0.9.0      # a specific release
+```
+
+| Item        | Value                                                                                           |
+| ----------- | ----------------------------------------------------------------------------------------------- |
+| Image       | `ghcr.io/nashcom/nshtestherd` with tags `<version>` and `latest`                                |
+| Platforms   | `linux/amd64`, `linux/arm64` (one manifest list, Docker picks the right one)                    |
+| Base        | `FROM scratch`: only the static binary (Alpine/musl build), no OS, no shell, no package manager |
+| Contents    | `/nshtestherd` and an empty `/tmp`                                                              |
+| User        | `1000:1000` (not root)                                                                          |
+| Entrypoint  | `/nshtestherd`: every argument you pass to `docker run` goes to the program                     |
+| Port        | `8788` (`EXPOSE`; publish it with `-p 8788:8788` for the server)                                |
+| Healthcheck | none (there is no shell or curl in the image); check `GET /health` from outside                 |
+| State       | none: everything is in memory, a container restart starts a fresh herd                          |
+
+The same static binary is attached to each GitHub release as `nshtestherd-<version>-amd64` and `-arm64` (with `.sha256`
+files), so you can run it without Docker.
+
+**Server.** Inside a container the server must listen on `0.0.0.0`; the default `127.0.0.1` is not reachable from outside:
+
+```bash
+docker run -d --name herd -p 8788:8788 ghcr.io/nashcom/nshtestherd --bind 0.0.0.0 --generate 100
+curl http://127.0.0.1:8788/health
+docker logs herd
+docker stop herd          # SIGTERM: graceful shutdown
+```
+
+To use your own accounts, mount the CSV read-only (the container user must be able to read the file):
+
+```bash
+docker run -d --name herd -p 8788:8788 -v "$PWD/users.csv:/users.csv:ro" \
+  ghcr.io/nashcom/nshtestherd --bind 0.0.0.0 --csv /users.csv
+```
+
+**Runner.** The same image is the runner. On a user-defined Docker network containers reach each other by name:
+
+```bash
+docker network create herdnet
+docker run -d --name herd --network herdnet -p 8788:8788 ghcr.io/nashcom/nshtestherd --bind 0.0.0.0 --generate 100
+docker run --rm --network herdnet ghcr.io/nashcom/nshtestherd --runner --server http://herd:8788 --clients 10
+```
+
+On a different machine use `--server http://<host>:8788`. Stop a runner with Ctrl+C or `docker stop` (clients report `done`).
+
+**Smoke test with the image only.** The binary can start itself as the child program, so no load program is needed:
+
+```bash
+docker run --rm --network herdnet ghcr.io/nashcom/nshtestherd --runner --server http://herd:8788 --clients 2 \
+  --program /nshtestherd -- --child-info
+curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
+```
+
+#### Docker Compose stack
+
+[docker-compose.yml](docker-compose.yml) is a ready-to-run stack: the coordinator (`herd`) and an optional runner (`runner`)
+that registers clients against it. It builds the image from the `Dockerfile` in this repository. The herd is the product and
+starts by default; the runner is a test tool in the compose profile `test` and only starts when you ask for it.
+
+```bash
+docker compose up -d --build                  # the herd only (use your own workers), in the background
+docker compose --profile test up --build      # the herd and a runner (foreground, Ctrl+C stops both)
+docker compose up runner                      # naming the runner starts it too (and the herd)
+```
+
+In another shell, drive the herd (the port is published on `127.0.0.1:8788`):
+
+```bash
+curl http://127.0.0.1:8788/status
+curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
+curl http://127.0.0.1:8788/metrics
+docker compose logs -f runner
+```
+
+| Service  | What it does                                                                                             | Profile | Restart policy |
+| -------- | -------------------------------------------------------------------------------------------------------- | ------- | -------------- |
+| `herd`   | The coordinator: `--bind 0.0.0.0 --port <HERD_PORT> --generate <HERD_USERS>`, port published on the host | (none)  | `always`       |
+| `runner` | `--runner --server http://herd:<HERD_PORT> --clients <RUNNER_CLIENTS>`, reaches the herd by service name | `test`  | `no`           |
+
+The herd always comes back after a Docker or host restart (but a restarted herd is a fresh herd, see below). The runner is
+not restarted automatically: a finished runner (stop command) or a failed one would otherwise register a new set of clients
+and use up accounts.
+
+Settings, from the shell environment or a `.env` file next to `docker-compose.yml`:
+
+| Variable            | Default              | Meaning                                                                                 |
+| ------------------- | -------------------- | --------------------------------------------------------------------------------------- |
+| `HERD_USERS`        | `100`                | Generated accounts (`load000001` ...). The pool is bounded.                             |
+| `RUNNER_CLIENTS`    | `10`                 | Logical clients per runner container.                                                   |
+| `HERD_PORT`         | `8788`               | Port, on the host and in the container.                                                 |
+| `HERD_BIND`         | `127.0.0.1`          | Host address the port is published on. `0.0.0.0` exposes it to the network (see below). |
+| `NSHTESTHERD_IMAGE` | `nshtestherd:latest` | Image name. The default is built locally; set it to use the published image.            |
+
+```bash
+HERD_USERS=500 RUNNER_CLIENTS=50 docker compose --profile test up -d --build
+```
+
+**Use the published image instead of building:**
+
+```bash
+NSHTESTHERD_IMAGE=ghcr.io/nashcom/nshtestherd:latest docker compose pull
+NSHTESTHERD_IMAGE=ghcr.io/nashcom/nshtestherd:latest docker compose up -d
+```
+
+**More runners.** Scale the runner service; each container runs its own `RUNNER_CLIENTS` clients and draws from the same
+pool, so ids and accounts never overlap. Keep the total within the pool, otherwise the runners that find it booked report
+failures:
+
+```bash
+docker compose --profile test up -d --scale runner=3   # 3 x RUNNER_CLIENTS clients, needs HERD_USERS >= that
+docker compose ps
+```
+
+**Your own accounts.** Put the CSV next to the compose file and, in `docker-compose.yml`, replace the `--generate` lines in
+the `herd` command with the two commented `--csv` lines, and enable the `volumes` entry (the container user, uid 1000, must be
+able to read `users.csv`):
+
+```yaml
+    command:
+      - "--bind"
+      - "0.0.0.0"
+      - "--port"
+      - "${HERD_PORT:-8788}"
+      - "--csv"
+      - "/users.csv"
+
+    volumes:
+      - ./users.csv:/users.csv:ro
+```
+
+**Smoke test without a load program.** Enable the commented `--program /nshtestherd -- --child-info` lines in the `runner`
+command. After a `run` command each client's child prints `child pid=... NSH_SHORTNAME=...` in `docker compose logs runner`.
+A real load program needs a derived image (see above); put its image name in `NSHTESTHERD_IMAGE` or in a `build:` of your own.
+
+**Runners on other machines.** Publish the herd on the network with `HERD_BIND=0.0.0.0` (trusted network only: there is no
+authentication and `/register` returns passwords), then start a runner on the other machine:
+
+```bash
+HERD_BIND=0.0.0.0 docker compose up -d herd
+docker run --rm ghcr.io/nashcom/nshtestherd --runner --server http://<herd-host>:8788 --clients 20
+```
+
+**Stopping and restarting.** `docker compose --profile test down` removes the containers, including the runner (without
+`--profile test` only the herd is removed); the next `up` starts a fresh herd (numbering from 1, all accounts free).
+Restarting only the herd (`docker compose restart herd`, or Docker restarting it) also resets it, and the running runners then
+lose their clients, so restart or recreate the runners with it: `docker compose --profile test up -d --force-recreate`. Workers can be
+stopped cleanly with `curl -X POST -d 'target=all&command=stop' http://127.0.0.1:8788/command`: the clients report `done`
+and the runner container exits with code 0.
+
+| Symptom                                            | Cause / fix                                                                                         |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Runner exits at once with "no free account left"   | `HERD_USERS` is smaller than the clients requested (all runners together). Raise `HERD_USERS`.      |
+| Runner log: "coordinator unreachable"              | The herd is not up yet or `HERD_PORT` differs between the two services; check `docker compose ps`.  |
+| Port already in use on `up`                        | Another service uses the port; set `HERD_PORT`.                                                     |
+| `docker compose up` starts no runner               | By design: the runner is in the `test` profile. Use `--profile test` or `docker compose up runner`. |
+| Runner on another machine cannot connect           | The herd is published on `127.0.0.1` only; start it with `HERD_BIND=0.0.0.0`.                       |
+| `docker compose` shows the herd as running, but... | There is no container healthcheck (scratch image); test with `curl http://127.0.0.1:8788/health`.   |
+
+**Running a real load program from the runner.** The base image contains nothing except `nshtestherd`, so a load program must
+be added in a derived image, and it has to run in that image (a static binary, or add the libraries it needs):
+
+```dockerfile
+FROM alpine:latest
+COPY --from=ghcr.io/nashcom/nshtestherd:latest /nshtestherd /usr/local/bin/nshtestherd
+COPY nshload /usr/local/bin/nshload
+USER 1000:1000
+ENTRYPOINT ["/usr/local/bin/nshtestherd"]
+```
+
+```bash
+docker run --rm --network herdnet my-runner --runner --server http://herd:8788 --clients 10 \
+  --program /usr/local/bin/nshload -- --config /etc/load.ini
+```
+
+The runner passes the account to each `nshload` process in `NSH_*` environment variables (see [Runner](#runner-optional)).
+
+**Security.** There is no authentication or TLS, and `/register` returns the account passwords. Publish the port only
+on a trusted test network (for example `-p 127.0.0.1:8788:8788` when only local tools need it).
+
+**Building the image yourself:**
+
+```bash
+./build.sh                                    # image nshtestherd:latest, static binary extracted to ./nshtestherd
+IMAGE_TAG=myregistry/nshtestherd:dev ./build.sh   # different tag
+docker build -t nshtestherd:latest .          # image only
+```
+
+The build is a two-stage `Dockerfile`: an Alpine stage compiles the static binary with `docker/compile_alpine_static.sh`
+(size-optimised, LTO, `--gc-sections`; `docker/fortify_shim.cpp` supplies glibc-only fortify symbols that musl's static libc
+lacks), and the `scratch` stage copies in just the binary.
 
 ## Server mode
 
@@ -330,7 +543,12 @@ src/runner.*      optional runner: logical clients over the HTTP API
 src/httpclient.*  minimal HTTP client (runner only)
 src/process.*     direct program launch, no shell (runner only)
 src/main.cpp      command line, signals
+src/version.h     NSHTESTHERD_VERSION, the single source of the version
 tests/            test_core, test_runner, integration.sh
 examples/         users.csv, worker.sh (Bash worker, no Domino calls)
 docs/PROTOCOL.md  HTTP API and worker contract
+Dockerfile        static Alpine build into a scratch image (docker/, build.sh)
+docker-compose.yml  coordinator + runner stack (see "Docker Compose stack")
+.github/          ci.yml (build + tests), release.yml (static binaries + GHCR image)
+push-release.sh   updates version.txt and pushes the vX.Y.Z tag
 ```

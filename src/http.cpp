@@ -205,17 +205,8 @@ bool HttpServer::Run()
 
     while (!stop_)
     {
-        fd_set readSet;
-        FD_ZERO(&readSet);
-        FD_SET(listener_, &readSet);
-
-        struct timeval tv;
-        tv.tv_sec  = 0;
-        tv.tv_usec = 500000;
-
-        int ready = select((int)listener_ + 1, &readSet, NULL, NULL, &tv);
-
-        if (ready <= 0)
+        // Wake up twice a second to notice Stop()
+        if (!SockWaitReadable(listener_, 500))
             continue;
 
         SocketHandle client = accept(listener_, NULL, NULL);

@@ -1,0 +1,7 @@
+*.o
+*.d
+nshtestherd
+test_core
+test_runner
+dist
+.git
