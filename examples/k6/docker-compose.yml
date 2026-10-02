@@ -1,0 +1,42 @@
+# Runs the k6 worker example with the official k6 container image, next to the nshtestherd Compose stack.
+#
+#   docker compose up -d --build                           # repository root: the coordinator ("herd")
+#   docker compose -f examples/k6/docker-compose.yml up    # this file: the k6 workers (Ctrl+C stops them)
+#
+# Nothing is built: the official grafana/k6 image runs our script, which is mounted into the container.
+# The container joins the network of the repository's stack (nshtestherd_default) and reaches the
+# coordinator by its service name. Settings (shell environment or a .env file next to this file):
+#   HERD_URL       coordinator             (default http://herd:8788)
+#   TARGET_URL     URL requested while the workers are "running"  (default: the coordinator's /status)
+#   VUS            number of workers       (default 5)
+#   DURATION       how long k6 runs        (default 5m)
+#   POLL_SECONDS   polling interval        (default 2)
+#   RUN_ID         part of the registration keys; REQUIRED to be unique per k6 instance in distributed runs (default: random)
+#   HERD_NETWORK   network of the stack    (default nshtestherd_default; the repository folder name + _default)
+#
+# Coordinator on another machine? Use plain docker, see README.md in this folder.
+
+services:
+
+  k6:
+    image: grafana/k6:latest
+    command: ["run", "/scripts/herd-worker.js"]
+
+    volumes:
+      - ./herd-worker.js:/scripts/herd-worker.js:ro
+
+    environment:
+      HERD_URL:     "${HERD_URL:-http://herd:8788}"
+      TARGET_URL:   "${TARGET_URL:-}"
+      RUN_ID:       "${RUN_ID:-}"
+      VUS:          "${VUS:-5}"
+      DURATION:     "${DURATION:-5m}"
+      POLL_SECONDS: "${POLL_SECONDS:-2}"
+
+    networks:
+      - herd
+
+networks:
+  herd:
+    name: "${HERD_NETWORK:-nshtestherd_default}"
+    external: true

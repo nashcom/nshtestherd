@@ -501,7 +501,7 @@ state it was in before the pause. A `run` that already completed is not launched
 that finished before the pause was applied, the previous state is `idle`, so resuming leaves it idle and the
 acknowledged `run` command id is not executed a second time. Only a new `command_id` starts new work.
 
-`examples/worker.sh` implements this contract in Bash. The built-in runner (`nshtestherd --runner`, see the
+`examples/worker.sh` implements this contract in Bash, and [examples/k6/](../examples/k6/) as a k6 script that runs in the official k6 container. The built-in runner (`nshtestherd --runner`, see the
 README) is a worker host that follows the same contract through the public API; it is optional and uses no
 private interface. For external programs it applies each command id once, between child executions, and
 reports a child's result as `idle` (exit 0) or `error` (anything else). The runner owns status reporting for its

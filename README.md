@@ -1,18 +1,20 @@
 # nshtestherd
 
-Small standalone coordinator for load/test workers. It imports existing test
-accounts, hands each registering worker one account plus a sequential test
-client number, receives worker status, delivers commands, and exposes
-Prometheus metrics.
+**nshtestherd** gives each of your test processes its own test user and controls them all from one place. You load your
+test accounts once; every worker that registers gets the next free account and a sequential test number, polls for
+commands (`run`, `pause`, `stop`), reports what it is doing, and Prometheus shows how the run is going.
 
-It does **not** provision users and does **not** run load itself (the optional
-[runner](#runner-optional) can launch your load program). It has no Domino
-dependency. Any HTTP client (C/C++, LotusScript, Bash, k6, curl) can be a worker.
+It does **not** create users and does **not** generate load itself: it coordinates the processes that do. It has no Domino
+dependency, and any HTTP client (C/C++, LotusScript, Bash, k6, curl) can be a worker. One small binary, no external
+libraries, all state in memory.
 
-Plain C++17 + OS sockets, no external libraries. Linux and Windows. All state
-is in memory; a restart begins a fresh herd (client numbering starts at 1, all
-accounts are free again). Stop the previous workers before restarting.
-Trusted test network assumed: no authentication, no TLS.
+A **herd** is one test run as the coordinator sees it: the account pool plus all clients registered against it.
+
+> **Security:** there is no authentication and no TLS, and `/register` hands out account passwords. Run it on a trusted test
+> network only, see [Security](#security).
+
+**Status:** version 0.9.0. Tested on Linux; the Windows build is written but not yet built or tested
+(see [Status and limits](#status-and-limits)).
 
 One executable, two modes:
 
@@ -25,59 +27,163 @@ One executable, two modes:
   │                      │            │  • clients and commands        │                                  │  • built-in dummy job, or      │
   │                      │            │  • /metrics                    │                                  │    one child per client        │
   │                      │            │                                │                                  │                                │
-  └──────────────────────┘            └────────────────┴───────────────┘                                  └────────────────────────────────┘
+  └──────────────────────┘            └────────────────────────────────┘                                  └────────────────────────────────┘
                                                        ▲
                                                        │
                                                        │  any other HTTP client works the same way
-                                ┌──────────────────────┬─────────────────────┐
+                                ┌────────────────────────────────────────────┐
                                 │  Your own workers                          │
                                 │  Bash · k6 · LotusScript · C/C++ · curl    │
                                 └────────────────────────────────────────────┘
 ```
 
-## Status
+## Contents
 
-| Area                                     | State                                                                 |
-| ---------------------------------------- | --------------------------------------------------------------------- |
-| Server, runner, CSV import, `--generate` | Complete                                                              |
-| Tested on                                | Linux (g++, GNU make): all test suites pass                           |
-| Windows build                            | Written (Winsock, `CreateProcess`), **not yet built or tested**       |
-| Not tested                               | Heavy load (503 on queue overflow, slow clients, 1000 runner clients) |
+- [Quick start](#quick-start) - running in five minutes
+- [Typical test run](#typical-test-run) - the admin workflow from start to finish
+- [Operator cheat sheet](#operator-cheat-sheet) - the commands you will use during a test
+- [Concepts](#concepts) - accounts, clients, commands, states
+- [Run with Docker](#run-with-docker) - container image and Docker Compose stack
+- [Build](#build) - from source
+- [Server mode](#server-mode) - options, account files, metrics, sizing
+- [Runner (optional)](#runner-optional) - a worker host that launches your test program
+- [Security](#security), [Troubleshooting](#troubleshooting), [Status and limits](#status-and-limits)
+- [Tests](#tests), [Repository layout](#repository-layout), [Releasing](#releasing-maintainers), [License](#license)
+
+The HTTP API with a curl example for every call is in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## Quick start
 
+**1. Start the coordinator** with 20 generated test users (use `--csv your-users.csv` for your own accounts):
+
 ```bash
-make
-./nshtestherd --csv examples/users.csv     # or without a CSV: ./nshtestherd --generate 100
+docker run -d --name herd -p 8788:8788 ghcr.io/nashcom/nshtestherd --bind 0.0.0.0 --generate 20
 ```
 
-In another shell:
+or from source (see [Build](#build)):
+
+```bash
+make
+./nshtestherd --generate 20
+```
+
+**2. Check that it is up:**
+
+```bash
+curl http://127.0.0.1:8788/health
+```
+
+```ini
+status=ok
+```
+
+**3. Register a test worker.** This is what every worker does first; it gets the next free account and a `test_id`:
 
 ```bash
 curl -X POST -d request_key=my-worker-1 http://127.0.0.1:8788/register
-curl -X POST -d 'target=all&command=run&job=mail-read' http://127.0.0.1:8788/command
-curl http://127.0.0.1:8788/metrics
-./examples/worker.sh        # example Bash worker
 ```
 
-Server and runner in two windows (no external program needed):
+```ini
+test_id=1
+firstname=Load
+lastname=000001
+password=TestPassword
+shortname=load000001
+internetaddress=load000001@example.com
+command=idle
+command_id=0
+job=
+pause_seconds=0
+```
+
+**4. Tell all clients to run a job**, then look at the client:
 
 ```bash
-# window 1
-./nshtestherd --generate 20 --verbose
-# window 2
+curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
+curl 'http://127.0.0.1:8788/client?test_id=1'
+```
+
+```ini
+test_id=1
+shortname=load000001
+state=registered
+ack_command_id=0
+last_contact_seconds=3
+message=
+command=run
+command_id=1
+job=demo
+pause_seconds=0
+```
+
+The *desired* command is `run`, but the worker has not reported yet (`state=registered`, `ack_command_id=0`). A worker
+polls `POST /status`, applies the command and acknowledges it; the two sides are tracked separately.
+
+**5. Let the built-in runner do the worker part.** It starts 5 clients that register, follow commands and run a small
+child program (here the binary itself, which prints its process id and the account it received):
+
+```bash
 ./nshtestherd --runner --clients 5 --program ./nshtestherd -- --child-info
-# window 3
 curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
 ```
 
-Full API with curl examples: [docs/PROTOCOL.md](docs/PROTOCOL.md). No compiler at hand? Use the [container image](#container-image) or the static binary from the GitHub release.
+(`./examples/worker.sh` is the same idea as a plain Bash script: it registers, polls, applies each command once and
+supports a timed pause.) Next: [Typical test run](#typical-test-run), and the full API in
+[docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+**Prefer to watch it run?** `examples/k6/run.sh` does all of this hands-free in containers: it starts the coordinator and
+k6 workers, drives a complete run, pause and stop, checks every step and cleans up (needs Docker and curl; see
+[examples/k6](examples/k6/)).
+
+## Typical test run
+
+1. **Prepare the accounts.** The users must exist in the system you test, with the passwords in the file. Use your
+   existing nshreg CSV (`--csv users.csv`, see [Account CSV](#account-csv)) or let the coordinator generate names
+   (`--generate N`).
+2. **Start the coordinator** on a machine the test machines can reach: `--bind 0.0.0.0` (or the Docker/Compose
+   [stack](#docker-compose-stack)). Open the port only for your test network.
+3. **Start the workers.** On every test machine start a runner that launches your test program once per client, for
+   example `nshtestherd --runner --server http://coordinator:8788 --clients 50 --program mytests -- --config mytests.ini`
+   (see [Runner](#runner-optional)). Or let your own workers call the API, for example the [k6 worker example](examples/k6/) (it runs in a container).
+4. **Check that everyone is registered:** `curl http://coordinator:8788/status` and compare `clients_total` with what you
+   expect (and `users_available` with what is left).
+5. **Start the test:** send `run` to all clients and watch `/status`, `/metrics` (Prometheus/Grafana) or a single
+   client with `/client?test_id=N`.
+6. **Steer:** `pause` for a number of seconds, `run` a different job, or `stop`. Each command reaches a worker the next
+   time it polls.
+7. **Finish and reset.** Stopped workers report `done`. Their accounts stay reserved, so to run again restart the
+   coordinator (a fresh herd with numbering from 1 and every account free). Stop the old workers first.
+
+## Operator cheat sheet
+
+Set `H` once (use the coordinator's host name when you are not on the same machine):
+
+```bash
+H=http://127.0.0.1:8788
+```
+
+| Goal               | Command                                                                     |
+| ------------------ | --------------------------------------------------------------------------- |
+| Is it up?          | `curl $H/health`                                                            |
+| Herd summary       | `curl $H/status`                                                            |
+| One client         | `curl "$H/client?test_id=1"`                                                |
+| Run a job on all   | `curl -X POST -d 'target=all&command=run&job=NAME' $H/command`              |
+| Pause all for 60 s | `curl -X POST -d 'target=all&command=pause&pause_seconds=60' $H/command`    |
+| Stop all           | `curl -X POST -d 'target=all&command=stop' $H/command`                      |
+| Stop one client    | `curl -X POST -d 'test_id=3&command=stop' $H/command`                       |
+| Load another pool  | `curl -X POST -H 'Content-Type: text/csv' --data-binary @users.csv $H/load` |
+| Metrics            | `curl $H/metrics`                                                           |
+| Start over         | Restart the coordinator (stop the workers first)                            |
+
+`/load` only works before the first client has registered. Add `-i` to any curl call to see the HTTP status, and
+`-H 'Accept: application/json'` to get JSON instead of `key=value` lines.
 
 ## Concepts
 
 | Term           | Meaning                                                                                        |
 | -------------- | ---------------------------------------------------------------------------------------------- |
 | Account pool   | The imported or generated users, in order. Each account is handed out once.                    |
+| Herd           | One test run: the account pool plus all clients registered against it.                         |
 | Client         | One registered worker: the next free account plus the next `test_id` (1, 2, 3, ...).           |
 | `test_id`      | Sequential client number from the server. Never reused in one run; unrelated to account names. |
 | `request_key`  | Optional key a worker generates once and repeats on retries: the same allocation comes back.   |
@@ -99,48 +205,10 @@ registered -> idle <-> running <-> paused
 - `target=all` reaches the clients that exist at that moment and have not finished; clients registering later start `idle`.
 - Pool exhausted: registration fails with 409 and does not consume a number.
 
-## Build
+## Run with Docker
 
-Requirements: a C++17 compiler (g++ 7+ or newer) and GNU make. On Windows use MinGW/MSYS2 (or the direct MSVC command below).
-
-```bash
-make          # builds ./nshtestherd (the product, one binary)
-make test     # also builds and runs test_core and test_runner (test programs, not part of the product)
-make clean
-```
-
-`make test` builds extra programs from `tests/`; they are separate executables and are not part of `nshtestherd`.
-For deployment only the `nshtestherd` binary is needed.
-
-Direct compiler builds (product only):
-
-```bash
-# Linux
-g++ -std=c++17 -O2 -Wall -Wextra -pthread -o nshtestherd src/main.cpp src/http.cpp src/runner.cpp src/httpclient.cpp src/process.cpp src/api.cpp src/herd.cpp src/csv.cpp src/wire.cpp
-
-# Windows (MSVC, Developer prompt)
-cl /std:c++17 /EHsc /O2 /Fe:nshtestherd.exe src\main.cpp src\http.cpp src\runner.cpp src\httpclient.cpp src\process.cpp src\api.cpp src\herd.cpp src\csv.cpp src\wire.cpp ws2_32.lib
-
-# Windows (MinGW)
-g++ -std=c++17 -O2 -o nshtestherd.exe src/main.cpp src/http.cpp src/runner.cpp src/httpclient.cpp src/process.cpp src/api.cpp src/herd.cpp src/csv.cpp src/wire.cpp -lws2_32 -lshell32 -pthread
-```
-
-## Versions, releases and Docker
-
-The version lives in one place: `NSHTESTHERD_VERSION` in [src/version.h](src/version.h) (currently `0.9.0`). It is what
-`./nshtestherd --version` prints and what the server shows in its startup line. `version.txt` is a convenience copy
-(anyone can read the latest released version without parsing the header); it plays no part in the build.
-
-| Step                 | What happens                                                                                |
-| -------------------- | ------------------------------------------------------------------------------------------- |
-| Push or pull request | `ci.yml`: `make`, `make test`, `tests/integration.sh` on Ubuntu                             |
-| `./push-release.sh`  | Updates `version.txt` (commits it if changed), re-tags and pushes `vX.Y.Z`                  |
-| Publish a release    | `release.yml`: static amd64 and arm64 binaries (+ `.sha256`) and a multi-arch image on GHCR |
-
-To release: change `NSHTESTHERD_VERSION`, commit, run `./push-release.sh`, then publish the release for the new tag on GitHub.
-
-Only the `nshtestherd` binary is a deliverable. The test programs are built by `make test` and CI only; they are not in the
-release assets or in the image.
+Prefer not to build from source? The release publishes a container image, and the repository contains a Docker Compose
+stack with the coordinator and an optional runner.
 
 ### Container image
 
@@ -200,7 +268,7 @@ docker run --rm --network herdnet ghcr.io/nashcom/nshtestherd --runner --server 
 curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
 ```
 
-#### Docker Compose stack
+### Docker Compose stack
 
 [docker-compose.yml](docker-compose.yml) is a ready-to-run stack: the coordinator (`herd`) and an optional runner (`runner`)
 that registers clients against it. It builds the image from the `Dockerfile` in this repository. The herd is the product and
@@ -338,6 +406,32 @@ The build is a two-stage `Dockerfile`: an Alpine stage compiles the static binar
 (size-optimised, LTO, `--gc-sections`; `docker/fortify_shim.cpp` supplies glibc-only fortify symbols that musl's static libc
 lacks), and the `scratch` stage copies in just the binary.
 
+## Build
+
+Requirements: a C++17 compiler (g++ 7+ or newer) and GNU make. On Windows use MinGW/MSYS2 (or the direct MSVC command below).
+
+```bash
+make          # builds ./nshtestherd (the product, one binary)
+make test     # also builds and runs test_core and test_runner (test programs, not part of the product)
+make clean
+```
+
+`make test` builds extra programs from `tests/`; they are separate executables and are not part of `nshtestherd`.
+For deployment only the `nshtestherd` binary is needed.
+
+Direct compiler builds (product only):
+
+```bash
+# Linux
+g++ -std=c++17 -O2 -Wall -Wextra -pthread -o nshtestherd src/main.cpp src/http.cpp src/runner.cpp src/httpclient.cpp src/process.cpp src/api.cpp src/herd.cpp src/csv.cpp src/wire.cpp
+
+# Windows (MSVC, Developer prompt)
+cl /std:c++17 /EHsc /O2 /Fe:nshtestherd.exe src\main.cpp src\http.cpp src\runner.cpp src\httpclient.cpp src\process.cpp src\api.cpp src\herd.cpp src\csv.cpp src\wire.cpp ws2_32.lib
+
+# Windows (MinGW)
+g++ -std=c++17 -O2 -o nshtestherd.exe src/main.cpp src/http.cpp src/runner.cpp src/httpclient.cpp src/process.cpp src/api.cpp src/herd.cpp src/csv.cpp src/wire.cpp -lws2_32 -lshell32 -pthread
+```
+
 ## Server mode
 
 `nshtestherd [options]` is the default mode. It runs in the foreground; Ctrl+C / SIGTERM shuts down gracefully.
@@ -397,6 +491,28 @@ scrape_configs:
 ```
 
 The full metric list is in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+Useful queries:
+
+```
+nshtestherd_clients_by_state{state="running"}          # clients running right now
+sum(nshtestherd_clients_by_state)                      # all registered clients
+nshtestherd_users_available                            # accounts still free
+rate(nshtestherd_status_reports_total[1m])             # status reports per second (polling load)
+nshtestherd_clients_by_state{state="error"} > 0        # alert: any client in error
+```
+
+### Sizing and operation
+
+- **Not load-tested yet.** Treat any client count above a few hundred as something to try first, and tell us what you find.
+- **Load profile.** Requests are tiny and handled in microseconds. The main load is polling: `N` clients polling every
+  2 seconds (the runner default, `--poll-seconds`) is about `N / 2` requests per second. Use a longer interval for very
+  large herds.
+- **Limits.** `--threads` workers (default 8) serve requests; up to 64 more connections wait in a queue and further ones get
+  `503`, which the runner retries. Raise `--threads` before raising the polling rate. State is in memory, a few hundred
+  bytes per client.
+- **Running it.** The server runs in the foreground and logs to stdout/stderr; stop it with Ctrl+C or SIGTERM (graceful).
+  As a service use Docker/Compose (`restart: always`) or your own service manager. A restart is a fresh herd.
 
 ## Runner (optional)
 
@@ -497,6 +613,22 @@ curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
 # [client 1 ...] child pid=4711 NSH_TEST_ID=1 NSH_SHORTNAME=load000001 NSH_JOB=demo ... NSH_PASSWORD=(set)
 ```
 
+## Security
+
+nshtestherd is a test tool for a trusted network. Know what an open port means:
+
+- **No authentication, no TLS.** Anyone who can reach the port can register (and receive an account **with its
+  password**), read the status, issue commands such as `stop` for every client, and load a new account pool before the
+  first registration.
+- **Safe defaults.** The server listens on `127.0.0.1`; the Compose stack publishes on `127.0.0.1`. Use `--bind 0.0.0.0` /
+  `HERD_BIND=0.0.0.0` only on a test network, and limit the port (8788 by default) with a firewall to the test machines.
+- **Across untrusted networks** put it behind an SSH tunnel or a TLS reverse proxy with authentication of your choice.
+- **Use test accounts only,** never real users. Passwords are kept in memory, are never written to logs (`--verbose` logs
+  method, path, status and `test_id` only, no bodies) and are not in metrics.
+- **Child programs** started by the runner receive the account in environment variables (never on the command line, so
+  not in `ps`). The same OS user and root can read a process environment.
+- **Container:** the image runs as user 1000 from `scratch` (no shell, no packages).
+
 ## Troubleshooting
 
 | Symptom                               | Cause / fix                                                               |
@@ -508,14 +640,24 @@ curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
 | Runner: "coordinator unreachable"     | Wrong `--server`, server down, or `--bind 127.0.0.1` with a remote runner |
 | 503 from the server                   | More than 64 waiting connections: raise `--threads` or poll less often    |
 | 413                                   | Request too large (64 KB; `--max-csv-bytes` for `/load`)                  |
+| Cannot bind: "Address already in use" | Another process uses the port: stop it or set `--port`                    |
+| Want to start over                    | Restart the coordinator (stop the workers first): a fresh herd            |
 
-## Limits and non-goals
+## Status and limits
+
+| Area                                     | State                                                                 |
+| ---------------------------------------- | --------------------------------------------------------------------- |
+| Server, runner, CSV import, `--generate` | Complete                                                              |
+| Tested on                                | Linux (g++, GNU make): all test suites pass                           |
+| Windows build                            | Written (Winsock, `CreateProcess`), **not yet built or tested**       |
+| Not tested                               | Heavy load (503 on queue overflow, slow clients, 1000 runner clients) |
 
 - All state in memory. No persistence, leases, or automatic account reclamation after a crashed worker.
 - No authentication, no TLS: run it on a trusted test network. `--bind 0.0.0.0` exposes the passwords returned by `/register`.
 - IPv4 only; the runner talks `http://` only.
 - One request per connection (no keep-alive, no chunked request bodies).
 - No Kubernetes integration, no web UI, no user provisioning, no load generation of its own.
+
 
 ## Tests
 
@@ -544,7 +686,7 @@ scenarios fail **on purpose** (a job that exits 1, a program that cannot be star
 there is the expected result. Only a `[ FAIL ]` line or a non-zero exit of `make test` means a problem.
 The `/bin/sh` scenarios are POSIX only; the self-child scenario also runs on Windows.
 
-## Layout
+## Repository layout
 
 ```
 src/platform.h    socket portability (Winsock / POSIX)
@@ -560,9 +702,31 @@ src/main.cpp      command line, signals
 src/version.h     NSHTESTHERD_VERSION, the single source of the version
 tests/            test_core, test_runner, integration.sh
 examples/         users.csv, worker.sh (Bash worker, no Domino calls)
+examples/k6/      k6 worker example: script, run.sh (hands-free end-to-end run), compose file, README
 docs/PROTOCOL.md  HTTP API and worker contract
 Dockerfile        static Alpine build into a scratch image (docker/, build.sh)
 docker-compose.yml  coordinator + runner stack (see "Docker Compose stack")
 .github/          ci.yml (build + tests), release.yml (static binaries + GHCR image)
 push-release.sh   updates version.txt and pushes the vX.Y.Z tag
 ```
+
+## Releasing (maintainers)
+
+The version lives in one place: `NSHTESTHERD_VERSION` in [src/version.h](src/version.h) (currently `0.9.0`). It is what
+`./nshtestherd --version` prints and what the server shows in its startup line. `version.txt` is a convenience copy
+(anyone can read the latest released version without parsing the header); it plays no part in the build.
+
+| Step                 | What happens                                                                                |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| Push or pull request | `ci.yml`: `make`, `make test`, `tests/integration.sh` on Ubuntu                             |
+| `./push-release.sh`  | Updates `version.txt` (commits it if changed), re-tags and pushes `vX.Y.Z`                  |
+| Publish a release    | `release.yml`: static amd64 and arm64 binaries (+ `.sha256`) and a multi-arch image on GHCR |
+
+To release: change `NSHTESTHERD_VERSION`, commit, run `./push-release.sh`, then publish the release for the new tag on GitHub.
+
+Only the `nshtestherd` binary is a deliverable. The test programs are built by `make test` and CI only; they are not in the
+release assets or in the image.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).
