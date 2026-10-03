@@ -68,7 +68,8 @@ void Usage()
         "                        pool is booked first. One registration and one thread per client.\n"
         "  --max-clients <n>     limit for the default mode (default 100)\n"
         "  --program <exe>       run this program once per client and run command (default: built-in dummy job)\n"
-        "  -- <args...>          arguments passed unchanged to every launched program\n"
+        "  -- <args...>          arguments for every launched program; {NSH_SHORTNAME}, {NSH_TEST_ID}, {NSH_JOB} ...\n"
+        "                        are replaced per client (the NSH_* variables are always passed as well)\n"
         "  --poll-seconds <n>    status polling interval (default 2)\n"
         "\n"
         "Smoke test (runs nshtestherd itself as the program; the child prints its pid and NSH_* values):\n"
@@ -483,6 +484,13 @@ int main(int argc, char **argv)
     }
 
     std::string err;
+
+    if (runnerMode && !ValidateArgTemplates(runner.programArgs, err))
+    {
+        std::fprintf(stderr, "Invalid program argument: %s\n", err.c_str());
+        return 2;
+    }
+
 
     if (!NetInit(err))
     {

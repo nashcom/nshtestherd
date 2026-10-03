@@ -435,7 +435,75 @@ static void TestMissingProgram()
     CHECK(1 == rc);
 }
 
+// The placeholders really arrive as arguments of the child (and the environment is still passed as well)
+static void TestTemplatedChild()
+{
+    TestServer srv(g_url.port);
+
+    if (!srv.Start(2))
+        exit(0);
+
+    RunnerConfig cfg = MakeRunner(1);
+    cfg.program      = "/bin/sh";
+    cfg.programArgs  = { "-c", "test \"$#\" = 3 && test \"$1\" = load1 && test \"$2\" = tpljob && test \"$3\" = 1 && test \"$NSH_SHORTNAME\" = load1",
+                         "sh", "{NSH_SHORTNAME}", "{NSH_JOB}", "{NSH_TEST_ID}" };
+
+    std::atomic<bool> stop(false);
+    int               rc = -1;
+    std::thread       rt([&]() { rc = RunRunner(cfg, stop); });
+
+    CHECK(WaitFor([]() { return Call("GET", "/status")["clients_total"] == "1"; }, 10000));
+    Call("POST", "/command", "test_id=1&command=run&job=tpljob");
+    CHECK(WaitFor([]() { Form c = Client(1); return c["state"] == "idle" && c["message"].find("finished (exit 0)") != std::string::npos; }, 10000));
+
+    Call("POST", "/command", "test_id=1&command=stop");
+    CHECK(WaitFor([]() { return Client(1)["state"] == "done"; }, 10000));
+    rt.join();
+    CHECK(0 == rc);
+}
+
 #endif
+
+// {NSH_...} placeholders in the program arguments (pure string handling, no processes)
+static void TestArgTemplates()
+{
+    EnvList values = {
+        { "NSH_TEST_ID", "7" },
+        { "NSH_SHORTNAME", "load000007" },
+        { "NSH_JOB", "mail read" },
+    };
+
+    std::string out;
+    std::string err;
+
+    CHECK(ExpandArgTemplate("--user={NSH_SHORTNAME}", values, out, err) && "--user=load000007" == out);
+    CHECK(ExpandArgTemplate("{NSH_TEST_ID}-{NSH_SHORTNAME}-{NSH_TEST_ID}", values, out, err) && "7-load000007-7" == out);
+    CHECK(ExpandArgTemplate("no placeholder", values, out, err) && "no placeholder" == out);
+
+    // a value with a space stays inside its single argument
+    CHECK(ExpandArgTemplate("{NSH_JOB}", values, out, err) && "mail read" == out);
+
+    // anything that is not a complete {NSH_NAME} stays literal (JSON, shell-like text, lone braces)
+    CHECK(ExpandArgTemplate("{\"a\":1}", values, out, err) && "{\"a\":1}" == out);
+    CHECK(ExpandArgTemplate("{NSH_ open", values, out, err) && "{NSH_ open" == out);
+    CHECK(ExpandArgTemplate("{NSH_lower}", values, out, err) && "{NSH_lower}" == out);
+    CHECK(ExpandArgTemplate("$NSH_SHORTNAME", values, out, err) && "$NSH_SHORTNAME" == out); // shell syntax is not ours
+
+    // values are inserted as they are, not expanded a second time
+    EnvList tricky = { { "NSH_JOB", "{NSH_TEST_ID}" }, { "NSH_TEST_ID", "7" } };
+    CHECK(ExpandArgTemplate("{NSH_JOB}", tricky, out, err) && "{NSH_TEST_ID}" == out);
+
+    // errors
+    CHECK(!ExpandArgTemplate("{NSH_UNKNOWN}", values, out, err) && err.find("unknown placeholder") != std::string::npos);
+    CHECK(!ExpandArgTemplate("--pw={NSH_PASSWORD}", values, out, err) && err.find("not allowed") != std::string::npos);
+
+    // startup validation knows every documented name, and refuses the rest
+    std::vector<std::string> good = { "{NSH_TEST_ID}", "{NSH_FIRSTNAME}", "{NSH_LASTNAME}", "{NSH_SHORTNAME}", "{NSH_INTERNETADDRESS}",
+                                      "{NSH_JOB}", "{NSH_COMMAND_ID}", "{NSH_SERVER}", "plain" };
+    CHECK(ValidateArgTemplates(good, err));
+    CHECK(!ValidateArgTemplates({ "--x", "{NSH_TYPO}" }, err));
+    CHECK(!ValidateArgTemplates({ "{NSH_PASSWORD}" }, err));
+}
 
 // Standard section header: blank line, rule, title, rule, blank line
 static void Header(const char *title)
@@ -488,6 +556,8 @@ int main()
             "a 'child pid=...' line, job finished (exit 0); 0 failed");
     RunTest("HTTP reply framing", TestReplyFraming,
             "no runner output (truncated, chunked and malformed replies are rejected)");
+    RunTest("program argument placeholders {NSH_...}", TestArgTemplates,
+            "no runner output (expansion, literal text, unknown names and {NSH_PASSWORD} refused)");
 #ifndef _WIN32
     RunTest("child that ignores SIGTERM", TestStubbornChild,
             "no runner output (the child is killed and reaped)");
@@ -495,6 +565,8 @@ int main()
             "first job finishes (exit 0); second job exits 1, so '1 failed' below is the INTENDED result");
     RunTest("external program that cannot be started", TestMissingProgram,
             "client ends in error and '1 failed' below is the INTENDED result");
+    RunTest("placeholders reach the child as arguments", TestTemplatedChild,
+            "job finishes (exit 0): the child got load1, tpljob and 1 as arguments; 0 failed");
 #endif
 
     Header("Summary");

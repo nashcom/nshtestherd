@@ -301,9 +301,34 @@ bool LogicalClient::Apply()
                 { "NSH_SERVER", config_.serverUrl },
             };
 
-            std::string err;
+            // The environment always carries everything. The arguments may use placeholders for all of it
+            // except the password.
+            EnvList values;
 
-            if (child_.Start(config_.program, config_.programArgs, env, err))
+            for (const auto &kv : env)
+            {
+                if ("NSH_PASSWORD" != kv.first)
+                    values.push_back(kv);
+            }
+
+            std::vector<std::string> args;
+            std::string              err;
+            bool                     expanded = true;
+
+            for (const std::string &a : config_.programArgs)
+            {
+                std::string out;
+
+                if (!ExpandArgTemplate(a, values, out, err))
+                {
+                    expanded = false;
+                    break;
+                }
+
+                args.push_back(out);
+            }
+
+            if (expanded && child_.Start(config_.program, args, env, err))
             {
                 state_   = "running";
                 message_ = "running job " + job_;
@@ -400,10 +425,101 @@ bool LogicalClient::Run()
 
 } // namespace
 
+bool ExpandArgTemplate(const std::string &arg, const EnvList &values, std::string &out, std::string &err)
+{
+    const char *nameChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
+    size_t      pos       = 0;
+
+    out.clear();
+
+    while (pos < arg.size())
+    {
+        size_t open = arg.find("{NSH_", pos);
+
+        if (std::string::npos == open)
+        {
+            out.append(arg, pos, std::string::npos);
+            break;
+        }
+
+        size_t      close = arg.find('}', open);
+        std::string name;
+
+        if (std::string::npos != close)
+            name = arg.substr(open + 1, close - open - 1);
+
+        // Not a complete placeholder (no closing brace, or other characters inside): literal text
+        if (name.empty() || std::string::npos != name.find_first_not_of(nameChars))
+        {
+            out.append(arg, pos, open + 1 - pos);
+            pos = open + 1;
+            continue;
+        }
+
+        out.append(arg, pos, open - pos);
+
+        if ("NSH_PASSWORD" == name)
+        {
+            err = "{NSH_PASSWORD} is not allowed in program arguments (it would be visible in the process list); "
+                  "read the environment variable NSH_PASSWORD instead";
+            return false;
+        }
+
+        bool found = false;
+
+        for (const auto &kv : values)
+        {
+            if (kv.first == name)
+            {
+                out += kv.second;
+                found = true;
+                break;
+            }
+        }
+
+        if (!found)
+        {
+            err = "unknown placeholder {" + name + "}";
+            return false;
+        }
+
+        pos = close + 1; // values are inserted as they are: no second pass over them
+    }
+
+    return true;
+}
+
+bool ValidateArgTemplates(const std::vector<std::string> &args, std::string &err)
+{
+    EnvList values;
+
+    for (const char *name : { "NSH_TEST_ID", "NSH_FIRSTNAME", "NSH_LASTNAME", "NSH_SHORTNAME", "NSH_INTERNETADDRESS",
+                              "NSH_JOB", "NSH_COMMAND_ID", "NSH_SERVER" })
+    {
+        values.push_back({ name, "x" });
+    }
+
+    for (const std::string &a : args)
+    {
+        std::string out;
+
+        if (!ExpandArgTemplate(a, values, out, err))
+            return false;
+    }
+
+    return true;
+}
+
 int RunRunner(const RunnerConfig &config, const std::atomic<bool> &stop)
 {
     HttpUrl     url;
     std::string err;
+
+    if (!ValidateArgTemplates(config.programArgs, err))
+    {
+        std::fprintf(stderr, "Invalid program argument: %s\n", err.c_str());
+        return 1;
+    }
 
     if (!ParseHttpUrl(config.serverUrl, url, err))
     {

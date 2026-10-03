@@ -526,7 +526,7 @@ nshtestherd --runner --server http://coordinator:8788                     # up t
 nshtestherd --runner --server http://coordinator:8788 --clients 100       # exactly 100 (per machine), built-in dummy job
 nshtestherd --runner --server http://coordinator:8788 --clients all       # one client per free account (max 1000), single runner
 nshtestherd --runner --server http://coordinator:8788 --clients 100 \
-  --program mytests -- --config mytests.ini                                  # external program
+  --program mytests -- --user {NSH_SHORTNAME} --id {NSH_TEST_ID}            # external program, per-client arguments
 ```
 
 | Option               | Default                 | Meaning                                                         |
@@ -560,8 +560,8 @@ Behaviour:
 - **Dummy job** (no `--program`): `run` marks the client running until superseded. It exercises
   allocation, commands, status reports and the coordinator metrics.
 - **External program**: every `run` command starts one child per client, directly (no shell;
-  use a real executable, not a `.bat`/`.cmd`). Arguments after `--` are passed unchanged. The
-  account and job come in via environment variables:
+  use a real executable, not a `.bat`/`.cmd`). Arguments after `--` go to every child, with placeholders replaced
+  per client (see below). The account and job **always** come in via environment variables:
 
   | Variable                                                                | Value                                        |
   | ----------------------------------------------------------------------- | -------------------------------------------- |
@@ -571,6 +571,25 @@ Behaviour:
   | `NSH_JOB`                                                               | job name from the `run` command              |
   | `NSH_COMMAND_ID`                                                        | command id that started this child           |
   | `NSH_SERVER`                                                            | coordinator URL                              |
+
+- **Argument placeholders.** To give every child its own command-line arguments, use the variable names in braces in the
+  arguments after `--`. The placeholders are exactly the environment variable names above, so there is nothing new to learn:
+
+  ```bash
+  nshtestherd --runner --clients 50 --program mytests -- --user {NSH_SHORTNAME} --id {NSH_TEST_ID} --scenario {NSH_JOB}
+  ```
+
+  For client 7 the child is started as `mytests --user load000007 --id 7 --scenario <job of the run command>`.
+  - Available: `{NSH_TEST_ID}`, `{NSH_FIRSTNAME}`, `{NSH_LASTNAME}`, `{NSH_SHORTNAME}`, `{NSH_INTERNETADDRESS}`,
+    `{NSH_JOB}`, `{NSH_COMMAND_ID}`, `{NSH_SERVER}`.
+  - There is no shell: a placeholder is replaced inside its own argument, so a value with spaces stays one argument.
+  - Everything that is not a complete `{NSH_NAME}` is literal text, so JSON such as `{"a":1}` needs no escaping.
+  - An unknown name (for example `{NSH_TYPO}`) is refused at startup with exit code 2, not when the first child starts.
+  - **`{NSH_PASSWORD}` is refused:** an argument is visible to every user in the process list (`ps`, `/proc`). A program
+    reads the password from the environment variable `NSH_PASSWORD` instead.
+  - Do not write `$NSH_SHORTNAME` or `${NSH_SHORTNAME}`: your shell, or Docker Compose in a `command:` list, expands that
+    itself before the runner sees it. Use the braces alone (`{NSH_SHORTNAME}`; they are safe in bash and in Compose).
+  - Values are inserted as they are and are never expanded a second time.
 
 - Child exit 0: the client reports `idle` with the message `job X finished (exit 0)`. A finished
   child is **not** restarted for an already acknowledged command id; a new `run` starts a new one.
@@ -672,7 +691,7 @@ tests/integration.sh ./nshtestherd   # HTTP layer with curl (default port 18788,
 | `test_runner`    | Runner against an in-process coordinator: dummy clients, fill and cap, child programs  |
 | `integration.sh` | Real HTTP with curl: limits, methods, CSV, retry keys, metrics, shutdown               |
 
-`test_runner` scenarios: dummy clients, fill mode and client cap, a `/bin/sh` child with a failing job, a program that
+`test_runner` scenarios: dummy clients, fill mode and client cap, argument placeholders, a `/bin/sh` child with a failing job, a program that
 cannot be started, the self-child (`--child-info`), reply framing (truncated and chunked replies are rejected) and a
 child that ignores SIGTERM (killed and reaped). It uses `127.0.0.1:18790` (`HERD_TEST_PORT`) and is skipped if that
 port is busy.
