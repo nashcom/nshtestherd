@@ -1,10 +1,14 @@
 // runner.cpp - optional runner: logical clients (one thread each) using the HTTP API
+//
+// The protocol logic (registration, polling, commands, pause timer) is the shared HerdClient in herdclient.cpp,
+// which domlem uses as well. This file supplies what is specific to the generic runner: a thread per client,
+// child processes (or the built-in dummy job) as the job, and the console log.
 
 #include "runner.h"
 
+#include "herdclient.h"
 #include "httpclient.h"
 #include "process.h"
-#include "wire.h"
 
 #include <algorithm>
 #include <chrono>
@@ -18,24 +22,14 @@
 namespace
 {
 
-typedef std::chrono::steady_clock Clock;
-
 std::mutex g_logMutex;
 
-void Log(int index, const std::string &testId, const std::string &text)
+void PrintLog(int index, const std::string &testId, const std::string &text)
 {
     std::lock_guard<std::mutex> lock(g_logMutex);
     std::printf("[client %d%s%s] %s\n", index, testId.empty() ? "" : " id ", testId.c_str(), text.c_str());
     std::fflush(stdout);
 }
-
-struct Instr
-{
-    long long   id           = 0;
-    std::string command      = "idle";
-    std::string job;
-    long long   pauseSeconds = 0;
-};
 
 // Outcome of a client's registration, published to the starter thread
 enum RegState
@@ -49,378 +43,136 @@ enum RegState
 // Hard cap on logical clients (one thread each), also for fill mode
 const int MAX_CLIENTS = 1000;
 
-bool IsNumber(const std::string &s)
-{
-    return !s.empty() && s.size() <= 15 && std::string::npos == s.find_first_not_of("0123456789");
-}
-
-// A registration reply must carry a valid test_id, the whole account and the first instruction
-bool CompleteRegistration(Form &f)
-{
-    if (!IsNumber(f["test_id"]) || "0" == f["test_id"] || f["shortname"].empty())
-        return false;
-
-    for (const char *key : { "firstname", "lastname", "password", "internetaddress", "command", "command_id" })
-    {
-        if (!f.count(key))
-            return false;
-    }
-
-    return true;
-}
-
-class LogicalClient
+// What is specific to the generic runner: how to wait, how to log, and what a "run" command does
+// (start a child process, or the built-in dummy job when no program is given).
+class RunnerHooks : public HerdHooks
 {
 public:
-    // fill: started without --clients; the first client to find the pool booked ends cleanly
     // stop: the caller's interrupt flag; halt: set by the runner itself to shut every client down
     // (for example when a thread could not be started)
-    LogicalClient(int index, const RunnerConfig &config, const HttpUrl &url, const std::string &runId, const std::atomic<bool> &stop, const std::atomic<bool> &halt, bool fill, std::atomic<int> &regState)
-        : index_(index), config_(config), url_(url), runId_(runId), stop_(stop), halt_(halt), fill_(fill), regState_(regState)
+    RunnerHooks(int index, const RunnerConfig &config, const std::atomic<bool> &stop, const std::atomic<bool> &halt, std::atomic<int> &regState)
+        : index_(index), config_(config), stop_(stop), halt_(halt), regState_(regState)
     {
     }
 
-    // Returns true when the client ended cleanly (stop command or runner interrupted).
-    bool Run();
+    bool Stopping() override
+    {
+        return stop_ || halt_;
+    }
+
+    void Sleep(int ms) override
+    {
+        // Sliced so a stop request is noticed quickly
+        for (int waited = 0; waited < ms && !Stopping(); waited += 50)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    void Log(const std::string &testId, const std::string &text) override
+    {
+        PrintLog(index_, testId, text);
+    }
+
+    void RegistrationDone(HerdRegistration outcome) override
+    {
+        regState_ = (HERD_REG_OK == outcome) ? REG_OK : (HERD_REG_EXHAUSTED == outcome) ? REG_EXHAUSTED : REG_FAILED;
+    }
+
+    bool          JobStart(const HerdJobContext &context, std::string &message, std::string &err) override;
+    bool          JobBusy() override { return child_.Running(); }
+    HerdJobResult JobStep(std::string &message) override;
+
+    void JobAbort() override
+    {
+        // SIGTERM, then SIGKILL if ignored, then reap: never leave a child behind
+        child_.StopAndReap(5000);
+    }
 
 private:
-    bool Register();
-    bool Report();
-    bool ReportFinal(const std::string &state, const std::string &message);
-    bool Apply();             // true when the client is finished (stop)
-    void CheckChild();
-    void Interrupted();
-    void Sleep(int ms);
-    void Say(const std::string &text) { Log(index_, testId_, text); }
-    bool Stopping() const { return stop_ || halt_; }
+    int                      index_;
+    const RunnerConfig      &config_;
+    const std::atomic<bool> &stop_;
+    const std::atomic<bool> &halt_;
+    std::atomic<int>        &regState_;
 
-    int                        index_;
-    const RunnerConfig        &config_;
-    HttpUrl                    url_;
-    std::string                runId_;
-    const std::atomic<bool>   &stop_;
-    const std::atomic<bool>   &halt_;
-    bool                       fill_;
-    std::atomic<int>          &regState_;
-
-    std::string testId_;
-    Form        account_;
-
-    std::string state_   = "idle"; // observed state, as reported
-    std::string message_;
-    std::string job_;
-    long long   applied_ = 0;      // last applied command_id, sent as ack_command_id
-    Instr       latest_;           // last instruction received
-    bool        lost_    = false;  // coordinator no longer knows this test_id
-
-    std::string resumeState_ = "idle";
-    Clock::time_point pauseUntil_;
-    long long   dummyOps_ = 0;
-
+    std::string  job_;
+    long long    dummyOps_ = 0;
     ChildProcess child_;
 };
 
-void LogicalClient::Sleep(int ms)
+bool RunnerHooks::JobStart(const HerdJobContext &context, std::string &message, std::string &err)
 {
-    // Sliced so a stop request is noticed quickly
-    for (int waited = 0; waited < ms && !Stopping(); waited += 50)
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-}
+    job_ = context.job;
 
-bool LogicalClient::Register()
-{
-    const std::string key = runId_ + "-" + std::to_string(index_);
-
-    // Spread start-up so many clients do not hit the coordinator in one burst
-    // (fill mode registers one client at a time already)
-    if (!fill_)
-        Sleep((index_ % 200) * 5);
-
-    while (!Stopping())
+    if (config_.program.empty())
     {
-        HttpReply   reply;
-        std::string err;
-
-        if (HttpCall(url_, "POST", "/register", "request_key=" + UrlEncode(key), reply, err))
-        {
-            Form f;
-            ParseTextFields(reply.body, f);
-
-            if (200 == reply.status || 201 == reply.status)
-            {
-                // Never trust a reply that lacks the account: retrying with the same key
-                // returns the same allocation, so an incomplete reply is safe to ask for again
-                if (!CompleteRegistration(f))
-                    Say("incomplete registration reply; retrying with the same request key");
-                else
-                {
-                    account_ = f;
-                    testId_  = f["test_id"];
-                    Say("registered as " + f["shortname"]);
-                    regState_ = REG_OK;
-                    return true;
-                }
-            }
-            // The pool may simply not be loaded yet; anything else is final
-            else if (409 == reply.status && "no_accounts_loaded" == f["error"])
-                Say("waiting: no account pool loaded yet");
-            else if (409 == reply.status && "pool_exhausted" == f["error"])
-            {
-                Say("no free account left");
-                regState_ = REG_EXHAUSTED;
-                return false;
-            }
-            else if (503 != reply.status)
-            {
-                Say("registration refused: " + f["message"]);
-                regState_ = REG_FAILED;
-                return false;
-            }
-        }
-        else
-            Say("coordinator unreachable: " + err);
-
-        Sleep(config_.pollMs);
-    }
-
-    regState_ = REG_FAILED;
-    return false;
-}
-
-bool LogicalClient::Report()
-{
-    std::string body = "test_id=" + testId_ + "&state=" + state_ + "&ack_command_id=" + std::to_string(applied_) + "&message=" + UrlEncode(message_);
-
-    HttpReply   reply;
-    std::string err;
-
-    if (!HttpCall(url_, "POST", "/status", body, reply, err))
-    {
-        Say("coordinator unreachable: " + err);
-        return false;
-    }
-
-    Form f;
-    ParseTextFields(reply.body, f);
-
-    if (404 == reply.status)
-    {
-        lost_ = true;
-        return false;
-    }
-
-    if (200 != reply.status)
-    {
-        Say("status report rejected: " + f["message"]);
-        return false;
-    }
-
-    // A 200 without the instruction fields is a damaged reply: do not act on defaults
-    if (!f.count("command_id") || !f.count("command") || !f.count("job") || !f.count("pause_seconds") || !IsNumber(f["command_id"]) || !IsNumber(f["pause_seconds"]))
-    {
-        Say("incomplete status reply; ignored");
-        return false;
-    }
-
-    latest_.id           = std::atoll(f["command_id"].c_str());
-    latest_.command      = f["command"];
-    latest_.job          = f["job"];
-    latest_.pauseSeconds = std::atoll(f["pause_seconds"].c_str());
-    return true;
-}
-
-bool LogicalClient::ReportFinal(const std::string &state, const std::string &message)
-{
-    state_   = state;
-    message_ = message;
-
-    for (int attempt = 0; attempt < 3; attempt++)
-    {
-        if (Report())
-            return true;
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
-
-    return false;
-}
-
-void LogicalClient::CheckChild()
-{
-    int code = 0;
-
-    if (!child_.Finished(code))
-        return;
-
-    if (0 == code)
-    {
-        state_   = "idle";
-        message_ = "job " + job_ + " finished (exit 0)";
-    }
-    else
-    {
-        state_   = "error";
-        message_ = "job " + job_ + " failed (exit " + std::to_string(code) + ")";
-    }
-
-    Say(message_);
-}
-
-// Called only between child executions. Each command_id is applied exactly once.
-bool LogicalClient::Apply()
-{
-    const Instr in = latest_;
-    applied_       = in.id;
-
-    if ("idle" == in.command)
-    {
-        state_   = "idle";
-        job_.clear();
-        message_ = "idle";
-    }
-    else if ("run" == in.command)
-    {
-        job_ = in.job;
-
-        if (config_.program.empty())
-        {
-            state_   = "running";
-            message_ = "dummy job " + job_;
-        }
-        else
-        {
-            EnvList env = {
-                { "NSH_TEST_ID", testId_ },
-                { "NSH_FIRSTNAME", account_["firstname"] },
-                { "NSH_LASTNAME", account_["lastname"] },
-                { "NSH_PASSWORD", account_["password"] },
-                { "NSH_SHORTNAME", account_["shortname"] },
-                { "NSH_INTERNETADDRESS", account_["internetaddress"] },
-                { "NSH_JOB", job_ },
-                { "NSH_COMMAND_ID", std::to_string(in.id) },
-                { "NSH_SERVER", config_.serverUrl },
-            };
-
-            // The environment always carries everything. The arguments may use placeholders for all of it
-            // except the password.
-            EnvList values;
-
-            for (const auto &kv : env)
-            {
-                if ("NSH_PASSWORD" != kv.first)
-                    values.push_back(kv);
-            }
-
-            std::vector<std::string> args;
-            std::string              err;
-            bool                     expanded = true;
-
-            for (const std::string &a : config_.programArgs)
-            {
-                std::string out;
-
-                if (!ExpandArgTemplate(a, values, out, err))
-                {
-                    expanded = false;
-                    break;
-                }
-
-                args.push_back(out);
-            }
-
-            if (expanded && child_.Start(config_.program, args, env, err))
-            {
-                state_   = "running";
-                message_ = "running job " + job_;
-            }
-            else
-            {
-                state_   = "error";
-                message_ = err;
-                Say("error: " + err);
-            }
-        }
-    }
-    else if ("pause" == in.command)
-    {
-        if ("paused" != state_)
-            resumeState_ = state_;
-
-        state_      = "paused";
-        pauseUntil_ = Clock::now() + std::chrono::seconds(in.pauseSeconds);
-        message_    = "paused " + std::to_string(in.pauseSeconds) + "s";
-    }
-    else if ("stop" == in.command)
-    {
-        ReportFinal("stopping", "stopping");
-        ReportFinal("done", "stopped by command");
-        Say("done");
+        message = "dummy job " + job_;
         return true;
     }
 
-    Say("applied command " + std::to_string(in.id) + ": " + in.command + (job_.empty() || "run" != in.command ? "" : " " + job_));
-    return false;
-}
+    const HerdAccount &a = context.account;
 
-void LogicalClient::Interrupted()
-{
-    // SIGTERM, then SIGKILL if ignored, then reap: never leave a child behind
-    child_.StopAndReap(5000);
+    EnvList env = {
+        { "NSH_TEST_ID", a.testId },
+        { "NSH_FIRSTNAME", a.firstName },
+        { "NSH_LASTNAME", a.lastName },
+        { "NSH_PASSWORD", a.password },
+        { "NSH_SHORTNAME", a.shortName },
+        { "NSH_INTERNETADDRESS", a.internetAddress },
+        { "NSH_JOB", context.job },
+        { "NSH_COMMAND_ID", std::to_string(context.commandId) },
+        { "NSH_SERVER", context.serverUrl },
+    };
 
-    ReportFinal("done", "runner interrupted");
-    Say("interrupted");
-}
+    // The environment always carries everything. The arguments may use placeholders for all of it
+    // except the password.
+    EnvList values;
 
-bool LogicalClient::Run()
-{
-    if (!Register())
+    for (const auto &kv : env)
     {
-        // Interrupted before registering is not a failure; neither is finding the
-        // pool fully booked in fill mode (that is how fill mode knows it is done).
-        return Stopping() || (fill_ && REG_EXHAUSTED == regState_);
+        if ("NSH_PASSWORD" != kv.first)
+            values.push_back(kv);
     }
 
-    for (;;)
+    std::vector<std::string> args;
+
+    for (const std::string &arg : config_.programArgs)
     {
-        if (Stopping())
-        {
-            Interrupted();
-            return true;
-        }
+        std::string out;
 
-        CheckChild();
-
-        if ("paused" == state_ && Clock::now() >= pauseUntil_)
-        {
-            state_   = resumeState_;
-            message_ = "pause over";
-        }
-
-        if ("running" == state_ && config_.program.empty())
-            message_ = "dummy ops=" + std::to_string(++dummyOps_);
-
-        bool ok = Report();
-
-        if (lost_)
-        {
-            Say("coordinator no longer knows this client (restarted?)");
-            return false;
-        }
-
-        // The error was just reported; the coordinator treats it as final
-        if ("error" == state_)
+        if (!ExpandArgTemplate(arg, values, out, err))
             return false;
 
-        if (ok && !child_.Running() && latest_.id > applied_)
-        {
-            if (Apply())
-                return true;
-
-            continue; // report the new state and acknowledgement right away
-        }
-
-        Sleep(config_.pollMs);
+        args.push_back(out);
     }
+
+    if (!child_.Start(config_.program, args, env, err))
+        return false;
+
+    message = "running job " + job_;
+    return true;
+}
+
+HerdJobResult RunnerHooks::JobStep(std::string &message)
+{
+    if (config_.program.empty())
+    {
+        message = "dummy ops=" + std::to_string(++dummyOps_);
+        return HERD_JOB_RUNNING;
+    }
+
+    int code = 0;
+
+    if (!child_.Finished(code))
+        return HERD_JOB_RUNNING;
+
+    if (0 == code)
+    {
+        message = "job " + job_ + " finished (exit 0)";
+        return HERD_JOB_FINISHED;
+    }
+
+    message = "job " + job_ + " failed (exit " + std::to_string(code) + ")";
+    return HERD_JOB_FAILED;
 }
 
 } // namespace
@@ -560,8 +312,24 @@ int RunRunner(const RunnerConfig &config, const std::atomic<bool> &stop)
         {
             threads.emplace_back([&, i]()
             {
-                LogicalClient client(i + 1, config, url, runId, stop, halt, fill, regStates[i]);
-                failed[i] = client.Run() ? 0 : 1;
+                RunnerHooks hooks(i + 1, config, stop, halt, regStates[i]);
+
+                HerdClientConfig clientConfig;
+                clientConfig.serverUrl    = config.serverUrl;
+                clientConfig.requestKey   = std::string(runId) + "-" + std::to_string(i + 1);
+                clientConfig.name         = "runner";
+                clientConfig.pollMs       = config.pollMs;
+                // Spread start-up so many clients do not hit the coordinator in one burst
+                // (fill mode registers one client at a time already)
+                clientConfig.startDelayMs = fill ? 0 : ((i + 1) % 200) * 5;
+                clientConfig.waitForAccount = false;   // the runner starts what the pool has: an exhausted pool ends the client
+
+                HerdClient client(clientConfig, hooks);
+                HerdEnd    end = client.Run();
+
+                // A booked pool ends a client cleanly only in fill mode: that is how fill mode knows it is done
+                bool ok = (HERD_END_CLEAN == end) || (fill && HERD_END_POOL_EXHAUSTED == end);
+                failed[i] = ok ? 0 : 1;
             });
         }
         catch (const std::exception &e)

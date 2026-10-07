@@ -6,6 +6,7 @@
 // and are POSIX only.
 
 #include "../src/api.h"
+#include "../src/herdclient.h"
 #include "../src/httpclient.h"
 #include "../src/process.h"
 #include "../src/runner.h"
@@ -505,6 +506,199 @@ static void TestArgTemplates()
     CHECK(!ValidateArgTemplates({ "{NSH_PASSWORD}" }, err));
 }
 
+// A program that is not the generic runner (domlem is one) uses HerdClient with its own hooks.
+// This one counts job steps, can fail a job and can fail its identity setup.
+class CustomHooks : public HerdHooks
+{
+public:
+    std::atomic<bool> stop;
+    std::atomic<int>  steps;
+    std::atomic<int>  failAfter;   // fail the job at this step; 0: never
+    std::atomic<bool> setupFails;
+    std::atomic<int>  waiting;      // calls of Waiting()
+    std::string       waitReason;   // written by the client thread: read it after join()
+    std::string       registeredAs; // written by the client thread: read it after join()
+    std::string       startedJob;
+
+    CustomHooks() : stop(false), steps(0), failAfter(0), setupFails(false), waiting(0) {}
+
+    void Waiting(const std::string &reason) override
+    {
+        waitReason = reason;
+        waiting++;
+    }
+
+    bool Stopping() override { return stop; }
+    void Sleep(int ms) override { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
+    void Log(const std::string &, const std::string &) override {}
+
+    bool Registered(const HerdAccount &account, std::string &err) override
+    {
+        registeredAs = account.shortName;
+
+        if (setupFails)
+        {
+            err = "no vault";
+            return false;
+        }
+
+        return true;
+    }
+
+    bool JobStart(const HerdJobContext &context, std::string &message, std::string &) override
+    {
+        startedJob = context.job;
+        message    = "custom " + context.job;
+        return true;
+    }
+
+    HerdJobResult JobStep(std::string &message) override
+    {
+        int n   = ++steps;
+        message = "step " + std::to_string(n);
+
+        if (failAfter > 0 && n >= failAfter)
+            return HERD_JOB_FAILED;
+
+        return HERD_JOB_RUNNING;
+    }
+};
+
+static HerdClientConfig CustomConfig(const char *key)
+{
+    HerdClientConfig c;
+    c.serverUrl  = "http://127.0.0.1:" + std::to_string(g_url.port);
+    c.requestKey = key;
+    c.name       = "testprog";
+    c.pollMs     = 50;
+    return c;
+}
+
+// register, run, pause (the steps must stand still), resume, stop
+static void TestHerdClientHooks()
+{
+    TestServer srv(g_url.port);
+
+    if (!srv.Start(3))
+        exit(0);
+
+    CustomHooks      hooks;
+    HerdClientConfig cfg = CustomConfig("hooks-test-1");
+    HerdEnd          end = HERD_END_FAILED;
+    std::thread      rt([&]() { HerdClient client(cfg, hooks); end = client.Run(); });
+
+    CHECK(WaitFor([]() { return Call("GET", "/status")["clients_total"] == "1"; }, 10000));
+
+    Call("POST", "/command", "test_id=1&command=run&job=custom");
+    CHECK(WaitFor([&]() { return Client(1)["state"] == "running" && hooks.steps >= 3; }, 10000));
+    CHECK("step" == Client(1)["message"].substr(0, 4));
+
+    // while paused no job step may run, however long the pause lasts
+    Call("POST", "/command", "test_id=1&command=pause&pause_seconds=1");
+    CHECK(WaitFor([]() { return Client(1)["state"] == "paused"; }, 10000));
+
+    int pausedSteps = hooks.steps;
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    CHECK(pausedSteps == hooks.steps);
+
+    CHECK(WaitFor([]() { return Client(1)["state"] == "running"; }, 10000));
+    CHECK(WaitFor([&]() { return hooks.steps > pausedSteps; }, 10000));
+
+    Call("POST", "/command", "test_id=1&command=stop");
+    CHECK(WaitFor([]() { return Client(1)["state"] == "done"; }, 10000));
+    rt.join();
+
+    CHECK(HERD_END_CLEAN == end);
+    CHECK("load1" == hooks.registeredAs);
+    CHECK("custom" == hooks.startedJob);
+}
+
+// a failing job ends the client in error; so does a failing identity setup
+static void TestHerdClientFailures()
+{
+    {
+        TestServer srv(g_url.port);
+
+        if (!srv.Start(2))
+            exit(0);
+
+        CustomHooks      hooks;
+        HerdClientConfig cfg = CustomConfig("hooks-test-2");
+        HerdEnd          end = HERD_END_CLEAN;
+        hooks.failAfter      = 2;
+        std::thread rt([&]() { HerdClient client(cfg, hooks); end = client.Run(); });
+
+        CHECK(WaitFor([]() { return Call("GET", "/status")["clients_total"] == "1"; }, 10000));
+        Call("POST", "/command", "test_id=1&command=run&job=custom");
+        CHECK(WaitFor([]() { return Client(1)["state"] == "error"; }, 10000));
+        rt.join();
+        CHECK(HERD_END_FAILED == end);
+    }
+
+    {
+        TestServer srv(g_url.port);
+
+        if (!srv.Start(2))
+            exit(0);
+
+        CustomHooks      hooks;
+        HerdClientConfig cfg = CustomConfig("hooks-test-3");
+        HerdEnd          end = HERD_END_CLEAN;
+        hooks.setupFails     = true;
+        std::thread rt([&]() { HerdClient client(cfg, hooks); end = client.Run(); });
+
+        CHECK(WaitFor([]() { return Client(1)["state"] == "error"; }, 10000));
+        CHECK(Client(1)["message"].find("identity setup failed") != std::string::npos);
+        rt.join();
+        CHECK(HERD_END_FAILED == end);
+        CHECK(0 == hooks.steps);
+    }
+}
+
+// A client that finds no free account keeps waiting (the default), and says so; told not to, it ends
+static void TestWaitForAccount()
+{
+    TestServer srv(g_url.port);
+
+    if (!srv.Start(1))
+        exit(0);
+
+    CustomHooks      first;
+    CustomHooks      second;
+    CustomHooks      third;
+    HerdClientConfig cfg1 = CustomConfig("wait-1");
+    HerdClientConfig cfg2 = CustomConfig("wait-2");
+    HerdClientConfig cfg3 = CustomConfig("wait-3");
+    HerdEnd          end1 = HERD_END_FAILED;
+    HerdEnd          end2 = HERD_END_FAILED;
+    HerdEnd          end3 = HERD_END_CLEAN;
+
+    cfg3.waitForAccount = false;   // waiting is the default
+
+    std::thread t1([&]() { HerdClient client(cfg1, first); end1 = client.Run(); });
+    CHECK(WaitFor([]() { return Call("GET", "/status")["clients_total"] == "1"; }, 10000));
+
+    // The only account is taken: this one waits and says why
+    std::thread t2([&]() { HerdClient client(cfg2, second); end2 = client.Run(); });
+    CHECK(WaitFor([&]() { return second.waiting > 0; }, 10000));
+    CHECK("1" == Call("GET", "/status")["clients_total"]);
+
+    // One that is told not to wait ends with the pool exhausted
+    std::thread t3([&]() { HerdClient client(cfg3, third); end3 = client.Run(); });
+    t3.join();
+    CHECK(HERD_END_POOL_EXHAUSTED == end3);
+    CHECK(0 == third.waiting);
+
+    second.stop = true;
+    t2.join();
+    CHECK(HERD_END_CLEAN == end2);
+    CHECK(second.waitReason.find("no free account") != std::string::npos);
+
+    first.stop = true;
+    t1.join();
+}
+
+
 // Standard section header: blank line, rule, title, rule, blank line
 static void Header(const char *title)
 {
@@ -556,6 +750,12 @@ int main()
             "a 'child pid=...' line, job finished (exit 0); 0 failed");
     RunTest("HTTP reply framing", TestReplyFraming,
             "no runner output (truncated, chunked and malformed replies are rejected)");
+    RunTest("shared client core with custom job hooks (what domlem uses)", TestHerdClientHooks,
+            "no runner output (a counted job step runs, stands still while paused, then stop)");
+    RunTest("waiting for an account", TestWaitForAccount,
+            "no runner output (one waits and reports it, one ends with the pool exhausted)");
+    RunTest("custom hooks: failing job and failing identity setup", TestHerdClientFailures,
+            "no runner output (both end the client in error)");
     RunTest("program argument placeholders {NSH_...}", TestArgTemplates,
             "no runner output (expansion, literal text, unknown names and {NSH_PASSWORD} refused)");
 #ifndef _WIN32

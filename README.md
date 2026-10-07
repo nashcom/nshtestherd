@@ -50,7 +50,8 @@ One executable, two modes:
 - [Security](#security), [Troubleshooting](#troubleshooting), [Status and limits](#status-and-limits)
 - [Tests](#tests), [Repository layout](#repository-layout), [Releasing](#releasing-maintainers), [License](#license)
 
-The HTTP API with a curl example for every call is in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+The HTTP API with a curl example for every call is in [docs/PROTOCOL.md](docs/PROTOCOL.md). Writing a program that the runner
+starts (identity, arguments, exit codes, cooperative stop): [docs/RUNNER-PROGRAMS.md](docs/RUNNER-PROGRAMS.md).
 
 ## Quick start
 
@@ -604,10 +605,12 @@ Behaviour:
   (state, acknowledgements, last contact). A child must not report with the same `test_id`: its reports would
   overwrite the runner's state and acknowledgements. A child may read its desired command with
   `GET /client?test_id=$NSH_TEST_ID` (read-only, no password), but it cannot acknowledge it.
-- **Cooperative control (not implemented yet).** Live pause/stop of a running child, for example a load program,
-  needs that program's cooperation. The intended design keeps the ownership above: the child watches the desired
-  command read-only and reports what it did through its exit code or a runner-side channel, while the runner
-  stays the single reporter. Until then, long-running children delay pause and stop until they exit.
+- **Cooperative stop for long-running programs.** The runner cannot pause or stop a program in the middle of its work; the
+  program has to cooperate. It can do that today: it reads the desired command read-only with
+  `GET /client?test_id=$NSH_TEST_ID`, and when it sees `stop` (or `pause`) it finishes its current operation and exits
+  with 0. The runner then applies the pending command and reports it. The runner stays the only status reporter. A ready-made
+  helper library is not provided yet. The pattern, an example script and the exit code rules are in
+  [docs/RUNNER-PROGRAMS.md](docs/RUNNER-PROGRAMS.md).
 - One process per logical client suits workloads that need a separate identity per process (for
   example Domino); threads are used only for the runner's own coordination and dummy clients.
 - Registration is spread over the first seconds and retried with the same key (503, unreachable server,
@@ -631,6 +634,14 @@ The runner can start `nshtestherd` itself as the child. `--child-info` prints th
 curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
 # [client 1 ...] child pid=4711 NSH_TEST_ID=1 NSH_SHORTNAME=load000001 NSH_JOB=demo ... NSH_PASSWORD=(set)
 ```
+
+### Domino workers: domlem
+
+[domlem](domlem/) is the Domino add-in version of a runner: a servertask that registers with the coordinator, receives a
+test account and does Notes work (for example opening a database as that user) while following `run`, `pause` and `stop`.
+It uses the same client core as the runner (`src/herdclient.*`), so it behaves the same way. With `-switch` it registers
+the Domino user (with mail file) if it does not exist, downloads its ID from the ID vault and works as that user. One
+process is one client; start it many times for many clients. See [domlem/README.md](domlem/README.md).
 
 ## Security
 
@@ -714,6 +725,7 @@ src/wire.*        flat fields, text/JSON rendering, form decoding
 src/herd.*        in-memory state, one mutex, no socket access
 src/api.*         routing and request validation (testable without sockets)
 src/http.*        bounded-thread HTTP/1.1 listener, one request per connection
+src/herdclient.*  shared client core: register, poll, commands (used by the runner and by domlem)
 src/runner.*      optional runner: logical clients over the HTTP API
 src/httpclient.*  minimal HTTP client (runner only)
 src/process.*     direct program launch, no shell (runner only)
@@ -722,7 +734,9 @@ src/version.h     NSHTESTHERD_VERSION, the single source of the version
 tests/            test_core, test_runner, integration.sh
 examples/         users.csv, worker.sh (Bash worker, no Domino calls)
 examples/k6/      k6 worker example: script, run.sh (hands-free end-to-end run), compose file, README
+domlem/           Domino add-in worker (Notes C API): client core + Notes hooks, user registration, makefile
 docs/PROTOCOL.md  HTTP API and worker contract
+docs/RUNNER-PROGRAMS.md  programs the runner starts: environment, arguments, exit codes, stop
 Dockerfile        static Alpine build into a scratch image (docker/, build.sh)
 docker-compose.yml  coordinator + runner stack (see "Docker Compose stack")
 .github/          ci.yml (build + tests), release.yml (static binaries + GHCR image)

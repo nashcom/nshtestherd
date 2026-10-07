@@ -42,3 +42,6 @@ Thumbs.db
 
 # Release build output
 dist/
+
+# domlem (Domino worker) build output
+/domlem/domlem

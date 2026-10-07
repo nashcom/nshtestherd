@@ -479,7 +479,10 @@ The same set in JSON: `curl -H 'Accept: application/json' -i http://127.0.0.1:87
 
 ## Worker contract
 
-1. Generate a `request_key` once; `POST /register` (retry with the same key on failure).
+1. Generate a `request_key` once; `POST /register` (retry with the same key on failure). A worker that should wait
+   for work keeps retrying also on `409 no_accounts_loaded` and `409 pool_exhausted` and shows why it waits (the shared
+   client core does this by default, `waitForAccount`; with it off `pool_exhausted` ends the worker, which is what the
+   generic runner wants to find out how many accounts the pool has).
 2. Prepare identity from the returned account (a Domino worker builds its Notes name and derives its
    organization from its own admin identity).
 3. Loop: `POST /status` with the observed `state` and the last **applied** `command_id`.
