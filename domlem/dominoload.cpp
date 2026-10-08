@@ -43,6 +43,13 @@ void DominoLoad::SetMail (const char *pszRecipients, const MailSettings &Setting
 }
 
 
+void DominoLoad::SetWorker (const char *pszTestId, const char *pszShortName)
+{
+    m_TestId    = pszTestId ? pszTestId : "";
+    m_ShortName = pszShortName ? pszShortName : "";
+}
+
+
 STATUS DominoLoad::Init (const char *pszServer, const char *pszDbFile, std::string &Err)
 {
     STATUS error = NOERROR;
@@ -97,6 +104,31 @@ Done:
         Term();
 
     return error;
+}
+
+
+std::string DominoLoad::GetDbLogicalPath() const
+{
+    std::string Path;
+    char        szCanonical[MAXPORTNAME+MAXUSERNAME+MAXPATH+8] = {0};
+    char        szFile[MAXPATH+1] = {0};
+
+    if (NULLHANDLE == m_hDb)
+        goto Done;
+
+    /* The canonical path of the open database, then only its file part: port and server are cut off by the API, the
+     * separators between them are not ours to know */
+    if (NOERROR != NSFDbPathGet (m_hDb, szCanonical, NULL))
+        goto Done;
+
+    if (NOERROR != OSPathNetParse (szCanonical, NULL, NULL, szFile))
+        goto Done;
+
+    Path = szFile;
+
+Done:
+
+    return Path;
 }
 
 
@@ -307,13 +339,56 @@ Done:
 }
 
 
+/* The sender's mail file from the directory, opened for the sent copies. SENTCOPY_AUTO without a mail file in the
+ * directory is not an error: then there are no sent copies (logged once per job). */
+
+STATUS DominoLoad::OpenSentCopy (std::string &Err)
+{
+    STATUS error = NOERROR;
+    char   szMailServer[MAXUSERNAME+1] = {0};
+    char   szMailFile[MAXPATH+1]       = {0};
+    char   szPath[MAXPATH+1]           = {0};
+
+    if (!LookupMailFile (NullIfEmpty ((char *) m_Server.c_str()), m_UserName.c_str(), szMailServer, (WORD) sizeof (szMailServer), szMailFile, (WORD) sizeof (szMailFile)))
+    {
+        if (SENTCOPY_ON == m_MailSettings.SentCopy)
+        {
+            Err   = "No mail file for [" + m_UserName + "] in the directory: no sent copy possible";
+            error = ERR_NOT_FOUND;
+        }
+        else
+            AddInLogMessageText ("%s: No mail file for [%s] in the directory: mails without sent copy", NOERROR, g_szLogPrefix, m_UserName.c_str());
+
+        goto Done;
+    }
+
+    /* No mail server in the person document: the server we work against */
+    error = OSPathNetConstruct (NULL, IsNullStr (szMailServer) ? NullIfEmpty ((char *) m_Server.c_str()) : szMailServer, szMailFile, szPath);
+
+    if (error)
+    {
+        Err = std::string ("Cannot construct the path of the mail file ") + szMailFile + ": " + ErrorText (error);
+        goto Done;
+    }
+
+    error = m_Mail.OpenSentCopy (szPath, Err);
+
+Done:
+
+    return error;
+}
+
+
 STATUS DominoLoad::OpSendMail (std::string &Message)
 {
     STATUS      error = NOERROR;
     std::vector<std::string> Recipients;
-    size_t      nIndex = 0;
-    char        szSubject[64]  = {0};
-    char        szMessage[MAXUSERNAME+64] = {0};
+    size_t      nIndex   = 0;
+    DWORD       dwNumber = m_dwMailsSent + 1;      /* this message within the job */
+    DWORD       dwRandom = 0;
+    std::string Subject;
+    char        szTag[MAXUSERNAME+64]       = {0};
+    char        szMessage[MAXUSERNAME+128]  = {0};
     static std::mt19937 Random ((std::random_device()()));
 
     if (!IsInit())
@@ -328,17 +403,30 @@ STATUS DominoLoad::OpSendMail (std::string &Message)
         m_Mail.SetBodySize (ValueRange (m_MailSettings.BodyKB.dwMin * 1024, m_MailSettings.BodyKB.dwMax * 1024));
         m_Mail.SetBodyStyle (m_MailSettings.BodyStyle);
         m_Mail.SetAttachments (m_MailSettings.AttachCount, ValueRange (m_MailSettings.AttachKB.dwMin * 1024, m_MailSettings.AttachKB.dwMax * 1024), m_MailSettings.bAttachBinary);
+        m_Mail.SetAttachmentTag (m_TestId.empty() ? "" : ("t" + m_TestId).c_str());
 
         error = m_Mail.Open (m_Server.c_str(), Message);
 
         if (error)
             goto Done;
+
+        if ((SENTCOPY_AUTO == m_MailSettings.SentCopy) || (SENTCOPY_ON == m_MailSettings.SentCopy))
+        {
+            error = OpenSentCopy (Message);
+
+            if (error)
+            {
+                m_Mail.Close();      /* the next attempt starts over */
+                goto Done;
+            }
+        }
     }
 
     /* -mailto is a list; random recipients are added; without both the mail goes to the sender */
     Recipients = SplitList (m_MailTo.c_str(), ',');
+    dwRandom   = PickInRange (m_MailSettings.RandomCount, (unsigned long) dwNumber * 7UL + 3);
 
-    if (m_MailSettings.dwRandomCount)
+    if (dwRandom)
     {
         if (!m_bRandomLoaded)
         {
@@ -348,7 +436,7 @@ STATUS DominoLoad::OpSendMail (std::string &Message)
                 goto Done;
         }
 
-        for (DWORD dwPick = 0; dwPick < m_MailSettings.dwRandomCount; dwPick++)
+        for (DWORD dwPick = 0; dwPick < dwRandom; dwPick++)
             Recipients.push_back (m_RandomNames[Random() % m_RandomNames.size()]);
     }
 
@@ -360,16 +448,29 @@ STATUS DominoLoad::OpSendMail (std::string &Message)
     for (nIndex = 0; nIndex < Recipients.size(); nIndex++)
         m_Mail.AddSendTo (Recipients[nIndex].c_str());
 
-    snprintf (szSubject, sizeof (szSubject), "domlem load test #%lu", (unsigned long) (m_dwMailsSent + 1));
+    /* "<subject> [domlem t3 load000003 #17]": the tag tells which worker sent which message */
+    if (SUBJECT_RANDOM == m_MailSettings.Subject)
+    {
+        TextGenerator Generator (m_MailSettings.BodyStyle);
+        Subject = Generator.Subject ((unsigned long) dwNumber);
+    }
+    else
+        Subject = "domlem load test";
 
-    error = m_Mail.Send (m_UserName.c_str(), szSubject, Message);
+    snprintf (szTag, sizeof (szTag), " [domlem%s%s%s%s #%lu]", m_TestId.empty() ? "" : " t", m_TestId.c_str(),
+              m_ShortName.empty() ? "" : " ", m_ShortName.c_str(), (unsigned long) dwNumber);
+    Subject += szTag;
+
+    error = m_Mail.Send (m_UserName.c_str(), Subject.c_str(), Message);
 
     if (error)
         goto Done;
 
     m_dwMailsSent++;
 
-    snprintf (szMessage, sizeof (szMessage), "mail #%lu submitted, %lu bytes text, %lu attachments with %lu bytes", (unsigned long) m_dwMailsSent, (unsigned long) m_Mail.GetLastBodyBytes(), (unsigned long) m_Mail.GetLastAttachCount(), (unsigned long) m_Mail.GetLastAttachBytes());
+    snprintf (szMessage, sizeof (szMessage), "mail #%lu submitted to %lu recipients%s, %lu bytes text, %lu attachments with %lu bytes",
+              (unsigned long) m_dwMailsSent, (unsigned long) Recipients.size(), m_Mail.HasSentCopy() ? " with sent copy" : "",
+              (unsigned long) m_Mail.GetLastBodyBytes(), (unsigned long) m_Mail.GetLastAttachCount(), (unsigned long) m_Mail.GetLastAttachBytes());
     Message = szMessage;
 
 Done:

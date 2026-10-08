@@ -5,4 +5,5 @@
 #include "herd.h"
 #include "http.h"
 
-HttpResponse HandleRequest(Herd &herd, const HttpRequest &req);
+// token: when not empty, every request except GET /health needs "Authorization: Bearer <token>" (else 401)
+HttpResponse HandleRequest(Herd &herd, const HttpRequest &req, const std::string &token = std::string());

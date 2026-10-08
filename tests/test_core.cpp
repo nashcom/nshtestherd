@@ -352,6 +352,143 @@ static void TestCommandsAndState()
     CHECK("ok" == Parse(Call(herd, "GET", "/health"))["status"]);
 }
 
+// With a token every call but the health check needs "Authorization: Bearer <token>"
+static void TestToken()
+{
+    Herd              herd;
+    const std::string token = "s3cret-token-0123456789";
+    Load(herd, 2);
+
+    auto call = [&](const std::string &method, const std::string &path, const std::string &authorization)
+    {
+        HttpRequest req;
+        req.method        = method;
+        req.path          = path;
+        req.authorization = authorization;
+        return HandleRequest(herd, req, token);
+    };
+
+    HttpResponse none = call("GET", "/status", "");
+    CHECK(401 == none.status && none.authChallenge && "unauthorized" == Parse(none)["error"]);
+    CHECK(401 == call("GET", "/status", "Bearer wrong-token-0123456789").status);
+    CHECK(401 == call("GET", "/status", "Bearer " + token.substr(0, token.size() - 1)).status);   // a prefix is not enough
+    CHECK(401 == call("GET", "/status", "Bearer " + token + "x").status);
+    CHECK(401 == call("GET", "/status", "Basic " + token).status);
+    CHECK(401 == call("POST", "/register", "").status);
+    CHECK(401 == call("GET", "/nope", "").status);                                              // no path probing either
+
+    CHECK(200 == call("GET", "/status", "Bearer " + token).status);
+    CHECK(200 == call("GET", "/status", "bearer " + token).status);                              // the scheme is case insensitive
+    CHECK(201 == call("POST", "/register", "Bearer " + token).status);
+    CHECK(200 == call("GET", "/health", "").status);                                             // liveness stays open
+
+    // without a token configured nothing changes
+    CHECK(200 == Call(herd, "GET", "/status").status);
+}
+
+// The coordinator's worker options come back with every registration, unchanged (empty when there are none)
+static void TestWorkerOptions()
+{
+    Herd herd;
+    Load(herd, 3);
+
+    Form r = Parse(Call(herd, "POST", "/register"));
+    CHECK(r.count("worker_options") && r["worker_options"].empty());
+
+    herd.SetWorkerOptions("switch&kind=domino");
+    r = Parse(Call(herd, "POST", "/register"));
+    CHECK("switch&kind=domino" == r["worker_options"]);
+
+    // a retry with the same key gets them as well
+    Call(herd, "POST", "/register", "request_key=wo-1");
+    CHECK("switch&kind=domino" == Parse(Call(herd, "POST", "/register", "request_key=wo-1"))["worker_options"]);
+}
+
+// Job parameters travel with a run command, unchanged, and only with it
+static void TestParams()
+{
+    Herd herd;
+    Load(herd, 2);
+    Call(herd, "POST", "/register");
+
+    Form c = Parse(Call(herd, "POST", "/command", "test_id=1&command=run&job=mailtest&params=mailsize%3D20-50%26mailattach%3D2"));
+    CHECK("1" == c["command_id"]);
+
+    Form s = Parse(Call(herd, "POST", "/status", "test_id=1&state=idle&ack_command_id=0"));
+    CHECK("run" == s["command"] && "mailtest" == s["job"] && "mailsize=20-50&mailattach=2" == s["params"]);
+    CHECK("mailsize=20-50&mailattach=2" == Parse(Call(herd, "GET", "/client?test_id=1"))["params"]);
+
+    // only with run, no blanks, not too long, not empty
+    CHECK(400 == Call(herd, "POST", "/command", "test_id=1&command=pause&pause_seconds=5&params=a%3D1").status);
+    CHECK(400 == Call(herd, "POST", "/command", "test_id=1&command=run&job=mail&params=a%20b").status);
+    CHECK(400 == Call(herd, "POST", "/command", "test_id=1&command=run&job=mail&params=" + std::string(1025, 'x')).status);
+    CHECK(400 == Call(herd, "POST", "/command", "test_id=1&command=run&job=mail&params=").status);
+    CHECK(200 == Call(herd, "POST", "/command", "test_id=1&command=run&job=mail&params=" + std::string(1024, 'x')).status);
+
+    // the next command without params has none
+    Call(herd, "POST", "/command", "test_id=1&command=run&job=dbopen");
+    s = Parse(Call(herd, "POST", "/status", "test_id=1&state=idle&ack_command_id=0"));
+    CHECK("dbopen" == s["job"] && s["params"].empty() && s.count("params"));
+}
+
+// The worker repeats its last job result with every report: it is counted once, per job
+static void TestJobResults()
+{
+    Herd herd;
+    Load(herd, 2);
+
+    Call(herd, "POST", "/register");
+    Call(herd, "POST", "/command", "test_id=1&command=run&job=mail");   // command 1
+    Call(herd, "POST", "/status", "test_id=1&state=running&ack_command_id=1&message=mail%20%233");
+
+    // validation: all three fields or none, a real result, an id that was issued
+    CHECK(400 == Call(herd, "POST", "/status", "test_id=1&state=idle&last_job_id=1").status);
+    CHECK(400 == Call(herd, "POST", "/status", "test_id=1&state=idle&last_job_id=1&last_job=mail&last_job_result=maybe").status);
+    CHECK(400 == Call(herd, "POST", "/status", "test_id=1&state=idle&last_job_id=0&last_job=mail&last_job_result=ok").status);
+    CHECK(400 == Call(herd, "POST", "/status", "test_id=1&state=idle&last_job_id=1&last_job=a%20b&last_job_result=ok").status);
+    HttpResponse beyond = Call(herd, "POST", "/status", "test_id=1&state=idle&last_job_id=2&last_job=mail&last_job_result=ok");
+    CHECK(400 == beyond.status && "invalid_last_job_id" == Parse(beyond)["error"]);
+
+    Form cl = Parse(Call(herd, "GET", "/client?test_id=1"));
+    CHECK("0" == cl["last_job_id"] && cl["last_job"].empty() && cl["last_job_result"].empty());
+
+    // the job fails: the client is idle again (not finished), the result is kept with its message
+    for (int i = 0; i < 3; i++)
+        CHECK(200 == Call(herd, "POST", "/status", "test_id=1&state=idle&ack_command_id=1&message=mail%20failed&last_job_id=1&last_job=mail&last_job_result=failed").status);
+
+    cl = Parse(Call(herd, "GET", "/client?test_id=1"));
+    CHECK("idle" == cl["state"] && "1" == cl["last_job_id"] && "mail" == cl["last_job"] && "failed" == cl["last_job_result"]);
+    CHECK("mail failed" == cl["last_job_message"]);
+
+    Form s = Parse(Call(herd, "GET", "/status"));
+    CHECK("0" == s["jobs_ok"] && "1" == s["jobs_failed"] && "0" == s["jobs_stopped"] && "0" == s["clients_error"]);
+
+    // the client can still be given work; the next job is stopped by an idle command
+    CHECK(200 == Call(herd, "POST", "/command", "test_id=1&command=run&job=agent").status);   // command 2
+    Call(herd, "POST", "/status", "test_id=1&state=running&ack_command_id=2&message=agent%20run&last_job_id=1&last_job=mail&last_job_result=failed");
+    CHECK(200 == Call(herd, "POST", "/command", "test_id=1&command=idle").status);            // command 3
+    Call(herd, "POST", "/status", "test_id=1&state=idle&ack_command_id=2&message=job%20agent%20stopped&last_job_id=2&last_job=agent&last_job_result=stopped");
+    Call(herd, "POST", "/status", "test_id=1&state=idle&ack_command_id=3&message=waiting&last_job_id=2&last_job=agent&last_job_result=stopped");
+
+    cl = Parse(Call(herd, "GET", "/client?test_id=1"));
+    CHECK("2" == cl["last_job_id"] && "agent" == cl["last_job"] && "stopped" == cl["last_job_result"] && "job agent stopped" == cl["last_job_message"]);
+
+    // a late report with an older job does not go back or count again
+    Call(herd, "POST", "/status", "test_id=1&state=idle&ack_command_id=3&last_job_id=1&last_job=mail&last_job_result=ok");
+    cl = Parse(Call(herd, "GET", "/client?test_id=1"));
+    CHECK("2" == cl["last_job_id"] && "stopped" == cl["last_job_result"]);
+
+    s = Parse(Call(herd, "GET", "/status"));
+    CHECK("0" == s["jobs_ok"] && "1" == s["jobs_failed"] && "1" == s["jobs_stopped"]);
+
+    const std::string m = Call(herd, "GET", "/metrics").body;
+    CHECK(m.find("# TYPE nshtestherd_jobs_ended_total counter") != std::string::npos);
+    CHECK(m.find("nshtestherd_jobs_ended_total{result=\"ok\"} 0\n") != std::string::npos);
+    CHECK(m.find("nshtestherd_jobs_ended_total{result=\"failed\"} 1\n") != std::string::npos);
+    CHECK(m.find("nshtestherd_jobs_ended_total{result=\"stopped\"} 1\n") != std::string::npos);
+    CHECK(m.find("agent") == std::string::npos);   // job names are not labels
+}
+
 static void TestMetrics()
 {
     Herd herd;
@@ -462,6 +599,10 @@ int main()
     RunTest("registration and retry keys", TestRegistration);
     RunTest("concurrent allocation", TestConcurrentAllocation);
     RunTest("commands and state", TestCommandsAndState);
+    RunTest("job results", TestJobResults);
+    RunTest("token", TestToken);
+    RunTest("job parameters", TestParams);
+    RunTest("worker options", TestWorkerOptions);
     RunTest("metrics", TestMetrics);
 
     Header("Summary");

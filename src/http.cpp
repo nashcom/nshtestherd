@@ -21,6 +21,7 @@ const char *ReasonPhrase(int status)
         case 200: return "OK";
         case 201: return "Created";
         case 400: return "Bad Request";
+        case 401: return "Unauthorized";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
         case 408: return "Request Timeout";
@@ -76,6 +77,9 @@ void SendResponse(SocketHandle s, const HttpResponse &resp)
 
     if (!resp.allow.empty())
         out += "Allow: " + resp.allow + "\r\n";
+
+    if (resp.authChallenge)
+        out += "WWW-Authenticate: Bearer realm=\"nshtestherd\"\r\n";
 
     out += "Cache-Control: no-store\r\nConnection: close\r\n\r\n";
     out += resp.body;
@@ -450,6 +454,8 @@ bool HttpServer::ReadRequest(SocketHandle s, HttpRequest &req, int &errStatus, s
             req.contentType = value;
         else if ("accept" == name)
             req.accept = value;
+        else if ("authorization" == name)
+            req.authorization = value;
         else if ("expect" == name)
             expectContinue = ("100-continue" == Lower(value));
     }

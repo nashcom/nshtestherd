@@ -7,6 +7,9 @@
 
 BIN="${1:-./nshtestherd}"
 PORT="${HERD_TEST_PORT:-18788}"
+
+# The checks expect a coordinator without a token, whatever the calling shell has set
+unset NSHTEST_TOKEN
 BASE="http://127.0.0.1:$PORT"
 FAILS=0
 CHECKS=0
@@ -51,7 +54,8 @@ fi
 
 header "Start server on port $PORT"
 
-"$BIN" --port "$PORT" --max-csv-bytes 4096 --timeout 3 &
+# --generate 0: start with an empty pool (the default would generate 100 accounts), the CSV checks load their own
+"$BIN" --port "$PORT" --generate 0 --max-csv-bytes 4096 --timeout 3 &
 PID=$!
 trap 'kill $PID 2>/dev/null' EXIT
 sleep 1

@@ -18,17 +18,19 @@ struct RunnerConfig
     bool                     fillAll    = false; // fill mode up to 1000 clients (--clients all)
     int                      pollMs    = 2000;
     std::string              program;     // empty: built-in dummy job
-    std::vector<std::string> programArgs; // passed after "--"; {NSH_...} placeholders are replaced per client
+    std::vector<std::string> programArgs; // passed after "--"; {NSHTEST_...} placeholders are replaced per client
     bool                     verbose = false;
+    std::string              token;       // coordinator token (from NSHTEST_TOKEN); empty: none
 };
 
 // Placeholders in program arguments: the names of the environment variables the child receives, in braces
-// ({NSH_TEST_ID}, {NSH_SHORTNAME}, {NSH_FIRSTNAME}, {NSH_LASTNAME}, {NSH_INTERNETADDRESS}, {NSH_JOB},
-// {NSH_COMMAND_ID}, {NSH_SERVER}). A placeholder is replaced inside its argument (no shell, no splitting).
-// Everything else is literal text. {NSH_PASSWORD} is refused: it would show up in the process list.
+// ({NSHTEST_TEST_ID}, {NSHTEST_SHORTNAME}, {NSHTEST_FIRSTNAME}, {NSHTEST_LASTNAME}, {NSHTEST_INTERNETADDRESS},
+// {NSHTEST_JOB}, {NSHTEST_PARAMS}, {NSHTEST_COMMAND_ID}, {NSHTEST_SERVER}; the old {NSH_...} names still work,
+// deprecated). A placeholder is replaced inside its argument (no shell, no splitting). Everything else is literal text.
+// {NSHTEST_PASSWORD} (and {NSH_PASSWORD}) is refused: it would show up in the process list.
 
 // Expands the placeholders of one argument using values (name, value). False with err for an unknown
-// placeholder or {NSH_PASSWORD}.
+// placeholder or {NSHTEST_PASSWORD}.
 bool ExpandArgTemplate(const std::string &arg, const EnvList &values, std::string &out, std::string &err);
 
 // Checks all arguments at startup, so a typo fails at once and not when the first child is launched.

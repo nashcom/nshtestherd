@@ -40,7 +40,9 @@ internetaddress=load000001@example.com
 command=idle
 command_id=0
 job=
+params=
 pause_seconds=0
+worker_options=
 ```
 
 ```bash
@@ -80,6 +82,9 @@ clients_paused=0
 clients_stopping=0
 clients_done=0
 clients_error=0
+jobs_ok=0
+jobs_failed=0
+jobs_stopped=0
 uptime_seconds=12
 ```
 
@@ -106,6 +111,7 @@ test_id=1
 command=run
 command_id=1
 job=mail-read
+params=
 pause_seconds=0
 ```
 
@@ -125,8 +131,15 @@ message=
 command=run
 command_id=1
 job=mail-read
+params=
 pause_seconds=0
+last_job_id=0
+last_job=
+last_job_result=
+last_job_message=
 ```
+
+No job has ended yet: `last_job_id=0`.
 
 **7. Pause one client for 30 seconds, and the worker acknowledges:**
 
@@ -145,7 +158,30 @@ updated=1
 curl -X POST -d 'test_id=1&state=paused&ack_command_id=2' http://127.0.0.1:8788/status
 ```
 
-**8. Stop everyone.** Each worker finishes its operation, reports `stopping`, then `done`:
+**8. A job ends.** After the pause the job of worker 1 fails. The worker reports the result of job 1 (the `run` with
+`command_id=1`) and is `idle` again: it keeps polling and waits for the next command. It sends the same `last_job_*`
+fields with every later report; the coordinator counts the job once.
+
+```bash
+curl -X POST -d 'test_id=1&state=idle&ack_command_id=2&message=mail%20server%20not%20responding&last_job_id=1&last_job=mail-read&last_job_result=failed' \
+  http://127.0.0.1:8788/status
+curl 'http://127.0.0.1:8788/client?test_id=1'
+```
+
+```ini
+test_id=1
+shortname=load000001
+state=idle
+...
+last_job_id=1
+last_job=mail-read
+last_job_result=failed
+last_job_message=mail server not responding
+```
+
+The summary counts it: `curl http://127.0.0.1:8788/status` shows `jobs_failed=1` (and `jobs_ok`, `jobs_stopped`).
+
+**9. Stop everyone.** Each worker finishes its operation, reports `stopping`, then `done`:
 
 ```bash
 curl -X POST -d 'target=all&command=stop' http://127.0.0.1:8788/command
@@ -153,7 +189,7 @@ curl -X POST -d 'test_id=1&state=stopping&ack_command_id=3' http://127.0.0.1:878
 curl -X POST -d 'test_id=1&state=done&ack_command_id=3&message=finished' http://127.0.0.1:8788/status
 ```
 
-**9. Metrics for Prometheus:**
+**10. Metrics for Prometheus:**
 
 ```bash
 curl http://127.0.0.1:8788/metrics
@@ -180,7 +216,7 @@ curl -X POST -H 'Accept: application/json' -d request_key=worker-c http://127.0.
 ```
 
 ```json
-{"test_id":3,"firstname":"Load","lastname":"000003","password":"TestPassword","shortname":"load000003","internetaddress":"load000003@example.com","command":"idle","command_id":0,"job":"","pause_seconds":0}
+{"test_id":3,"firstname":"Load","lastname":"000003","password":"TestPassword","shortname":"load000003","internetaddress":"load000003@example.com","command":"idle","command_id":0,"job":"","params":"","pause_seconds":0,"worker_options":""}
 ```
 
 | Status | Meaning                                                                |
@@ -188,6 +224,7 @@ curl -X POST -H 'Accept: application/json' -d request_key=worker-c http://127.0.
 | 201    | New registration                                                       |
 | 200    | Success / retry / read                                                 |
 | 400    | Invalid field or body                                                  |
+| 401    | Token missing or wrong (only when the coordinator has a token)         |
 | 404    | Unknown path or `test_id`                                              |
 | 405    | Method not allowed (`Allow` header set)                                |
 | 409    | Pool exhausted/not loaded, reload not allowed, client already finished |
@@ -196,6 +233,25 @@ curl -X POST -H 'Accept: application/json' -d request_key=worker-c http://127.0.
 | 503    | Connection queue full                                                  |
 
 Add `-i` to any curl call to see the status line, for example `curl -i http://127.0.0.1:8788/health`.
+
+### Token
+
+Start the coordinator with the environment variable `NSHTEST_TOKEN` set (16-256 printable characters, no blanks; an
+environment variable and not an option, so it does not show in the process list). Then every call except
+`GET /health` needs the header `Authorization: Bearer <token>`, workers and operators alike; without it, or with a
+wrong one, the answer is 401 `unauthorized` (with `WWW-Authenticate: Bearer`), before the path or the body is looked
+at. The comparison takes the same time however much of a guess is right. Without `NSHTEST_TOKEN` there is no check,
+as before: use that only on a closed test network.
+
+```bash
+export NSHTEST_TOKEN=$(openssl rand -hex 24)
+./nshtestherd --generate 3
+curl -H "Authorization: Bearer $NSHTEST_TOKEN" http://127.0.0.1:8788/status
+```
+
+The token travels in plain text (the coordinator speaks HTTP, not HTTPS): it keeps strangers on the network from
+steering the herd, not someone who can read the traffic. The runner, domlem and the examples read the same
+`NSHTEST_TOKEN`.
 
 ## Endpoints
 
@@ -259,7 +315,19 @@ internetaddress=load000001@example.com
 command=idle
 command_id=0
 job=
+params=
 pause_seconds=0
+worker_options=
+```
+
+`worker_options` is what the coordinator was started with (`--worker-options`, empty without), the same for every worker
+and every registration. The coordinator does not interpret it: a worker takes the names it knows and ignores the rest.
+So the protocol can carry options for one kind of worker without the others having to know them. domlem takes
+`switch` (work as the account's own user, unless the Domino server decides otherwise itself); the runner and the
+examples take nothing.
+
+```bash
+./nshtestherd --worker-options switch
 ```
 
 When no account can be given:
@@ -275,13 +343,14 @@ error=pool_exhausted
 message=all accounts are allocated
 ```
 
-The other 409 code is `no_accounts_loaded` (start with `--csv` / `--generate` or `POST /load` first).
+The other 409 code is `no_accounts_loaded`: the coordinator was started with an empty pool (`--generate 0`) and no
+`POST /load` has brought accounts yet. Without `--csv` or `--generate` it starts with 100 generated accounts.
 
 ### POST /status - report and poll
 
-Fields: `test_id` and `state` (required), `ack_command_id`, `message` (optional, max 512 bytes). `state` is
+Fields: `test_id` and `state` (required), `ack_command_id`, `message` (optional, max 2048 bytes). `state` is
 one of `idle running paused stopping done error`. The reply is the current instruction (`test_id`,
-`command`, `command_id`, `job`, `pause_seconds`). Every call updates the last-contact time.
+`command`, `command_id`, `job`, `params`, `pause_seconds`). Every call updates the last-contact time.
 
 `ack_command_id` means "applied", not "completed". It cannot exceed the issued `command_id` (otherwise 400),
 and it **never decreases**: a delayed report carrying an older id leaves the stored acknowledgement
@@ -299,6 +368,7 @@ test_id=1
 command=idle
 command_id=0
 job=
+params=
 pause_seconds=0
 ```
 
@@ -323,6 +393,27 @@ message=ack_command_id is newer than the issued command_id
 
 An unknown `test_id` returns 404 `unknown_test_id`.
 
+**Job results.** A job is one applied `run` command. When it ends, the worker reports how, with three more fields
+that always go together:
+
+| Field             | Value                                                                                 |
+| ----------------- | ------------------------------------------------------------------------------------- |
+| `last_job_id`     | the `command_id` of the `run` command that started the job                            |
+| `last_job`        | its job name                                                                          |
+| `last_job_result` | `ok` (finished by itself), `failed` (could not start, or failed), `stopped` (ended by a newer command or by the worker shutting down) |
+
+The worker sends the last result with **every** report, not once. The coordinator counts a result only when
+`last_job_id` is newer than the one it has for that client, so a lost reply or a retry never counts a job twice, and
+the next poll cannot overwrite it. The `message` of the report that brings a new result is kept with it
+(`last_job_message`). `last_job_id` cannot exceed the issued `command_id` (400 `invalid_last_job_id`).
+
+A job that ends does not end the worker: it reports `idle` with the result and waits for the next command.
+
+```bash
+curl -X POST -d 'test_id=1&state=idle&ack_command_id=2&message=mail%20failed&last_job_id=2&last_job=mail&last_job_result=failed' \
+  http://127.0.0.1:8788/status
+```
+
 ### POST /command - set an instruction
 
 Either `test_id=N` (one client) or `target=all` (every client that exists now and has not finished), plus `command`:
@@ -330,11 +421,23 @@ Either `test_id=N` (one client) or `target=all` (every client that exists now an
 | command | Fields                     | Worker behaviour                                                   |
 | ------- | -------------------------- | ------------------------------------------------------------------ |
 | `idle`  | none                       | Stay alive, no load, keep polling                                  |
-| `run`   | `job`                      | Start or continue the named workload (a name, not a shell command) |
+| `run`   | `job`, optional `params`   | Start the named workload (a name, not a shell command)             |
 | `pause` | `pause_seconds` 1-31536000 | Pause that long, keep polling, then resume the previous state      |
 | `stop`  | none                       | Finish the current operation, report `done`, exit                  |
 
 `job` is 1-128 characters of `A-Z a-z 0-9 . _ : / -`.
+
+`params` are the parameters of this run, 1-1024 printable ASCII characters without blanks. The coordinator does not
+interpret them: the worker gets them as they are with the instruction (`params` in the `/status` and `/register`
+replies; empty without parameters) and decides what they mean. The convention of the shipped workers is the URL style
+`name=value&name=value` (domlem: its job options; the runner: the environment variable `NSHTEST_PARAMS` of the child).
+Send them with `--data-urlencode`, so that their `&` and `=` stay inside the field:
+
+```bash
+curl -X POST -d 'target=all&command=run&job=mailtest' --data-urlencode 'params=mailsize=20-50&mailattach=2' http://127.0.0.1:8788/command
+```
+
+Every `run` carries its own parameters: a `run` without `params` has none, it does not inherit the ones before.
 
 ```bash
 curl -X POST -d 'target=all&command=run&job=mail-read'     http://127.0.0.1:8788/command
@@ -367,8 +470,10 @@ curl 'http://127.0.0.1:8788/client?test_id=1'
 ```
 
 Fields: `test_id`, `shortname`, `state` (as reported by the worker), `ack_command_id`, `last_contact_seconds`,
-`message`, and the desired instruction (`command`, `command_id`, `job`, `pause_seconds`). No password.
-A client whose `ack_command_id` is lower than its `command_id` has not applied the latest command yet.
+`message`, the desired instruction (`command`, `command_id`, `job`, `params`, `pause_seconds`) and the last job that ended
+(`last_job_id`, `last_job`, `last_job_result`, `last_job_message`; `last_job_id=0` and empty values when none has
+ended yet). No password. A client whose `ack_command_id` is lower than its `command_id` has not applied the latest
+command yet.
 
 ### GET /status - summary
 
@@ -376,8 +481,9 @@ A client whose `ack_command_id` is lower than its `command_id` has not applied t
 curl http://127.0.0.1:8788/status
 ```
 
-`users_total users_available users_allocated clients_total`, one `clients_<state>` count per state and
-`uptime_seconds`. No credentials. (A full example is in the walkthrough.)
+`users_total users_available users_allocated clients_total`, one `clients_<state>` count per state,
+`jobs_ok jobs_failed jobs_stopped` (jobs that ended, since the start) and `uptime_seconds`. No credentials. (A full
+example is in the walkthrough.)
 
 ### GET /metrics - Prometheus
 
@@ -416,11 +522,12 @@ Prefix `nshtestherd_`, content type `text/plain; version=0.0.4`.
 | `allocation_failures_total`     | counter | Registrations refused, no account left                    |
 | `status_reports_total`          | counter | Accepted status reports                                   |
 | `command_updates_total`         | counter | Command updates, per affected client                      |
+| `jobs_ended_total{result="..."}` | counter | Jobs that ended, by result `ok`, `failed`, `stopped`      |
 | `csv_loads_total`               | counter | Successful account imports                                |
 | `csv_load_failures_total`       | counter | Rejected account imports                                  |
 
-State label values: `registered`, `idle`, `running`, `paused`, `stopping`, `done`, `error`. No test ids, names,
-addresses, keys, messages or job names appear as labels.
+State label values: `registered`, `idle`, `running`, `paused`, `stopping`, `done`, `error`. Result label values:
+`ok`, `failed`, `stopped`. No test ids, names, addresses, keys, messages or job names appear as labels.
 
 ### GET /health
 
@@ -466,6 +573,8 @@ message=method not allowed for this path
 | `invalid_request`        | 400    | Unknown, duplicate or malformed field; bad value; wrong content type |
 | `invalid_csv`            | 400    | CSV rejected, `message` has the record number                        |
 | `invalid_ack_command_id` | 400    | `ack_command_id` is newer than the issued `command_id`               |
+| `invalid_last_job_id`    | 400    | `last_job_id` is newer than the issued `command_id`                  |
+| `unauthorized`           | 401    | Token missing or wrong (the coordinator runs with `NSHTEST_TOKEN`)  |
 | `not_found`              | 404    | Unknown path                                                         |
 | `unknown_test_id`        | 404    | No client with that `test_id`                                        |
 | `method_not_allowed`     | 405    | Wrong method for the path                                            |
@@ -485,12 +594,17 @@ The same set in JSON: `curl -H 'Accept: application/json' -i http://127.0.0.1:87
    generic runner wants to find out how many accounts the pool has).
 2. Prepare identity from the returned account (a Domino worker builds its Notes name and derives its
    organization from its own admin identity).
-3. Loop: `POST /status` with the observed `state` and the last **applied** `command_id`.
+3. Loop: `POST /status` with the observed `state` and the last **applied** `command_id`. With a coordinator token,
+   every call carries `Authorization: Bearer <token>`. A `run` comes with its `params` (may be empty): hand them to the
+   job; reject parameters the job does not know by failing the job, not the worker.
 4. Apply each `command_id` exactly once. If the id equals the last applied one, do nothing - in particular do
    not restart the job or reset a pause timer.
 5. Pause: start a monotonic timer when the instruction is applied; do not re-arm it on later polls. Switch
    jobs and pause at safe operation boundaries.
-6. Unknown `job`: report `state=error` with a message. Done: report `done` and exit.
+6. A job that ends (finished, failed - also an unknown `job` - or replaced by a newer `idle`, `run` or `stop`) is
+   reported with `last_job_id`, `last_job` and `last_job_result`, and the worker goes back to `idle` and waits. A job
+   never ends the worker; only `stop` (report `done` and exit) or the worker's own shutdown does. `error` is final and
+   meant for a worker that cannot work at all (the shared client core: identity setup failed).
 
 Coordinator-desired instruction and worker-reported state are independent: after a timed pause expires a
 worker reports `running` while the last desired instruction is still the already-acknowledged `pause`.
@@ -507,5 +621,5 @@ acknowledged `run` command id is not executed a second time. Only a new `command
 `examples/worker.sh` implements this contract in Bash, and [examples/k6/](../examples/k6/) as a k6 script that runs in the official k6 container. The built-in runner (`nshtestherd --runner`, see the
 README) is a worker host that follows the same contract through the public API; it is optional and uses no
 private interface. For external programs it applies each command id once, between child executions, and
-reports a child's result as `idle` (exit 0) or `error` (anything else). The runner owns status reporting for its
+reports a child's result as `ok` (exit 0) or `failed` (anything else), and the client goes back to `idle`. The runner owns status reporting for its
 clients: a child program must not post `/status` under the same `test_id`.

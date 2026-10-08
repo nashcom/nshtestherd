@@ -42,10 +42,25 @@ enum class CommandKind
 const char *CommandName(CommandKind kind);
 bool        ParseCommandName(const std::string &name, CommandKind &kind);
 
+// How a job (one applied "run" command) ended
+enum class JobResult
+{
+    None = 0,   // no job has ended yet
+    Ok,         // finished by itself
+    Failed,     // could not start, or failed
+    Stopped     // ended by a newer command or by the worker shutting down
+};
+
+const int JOB_RESULT_COUNT = 4;
+
+const char *JobResultName(JobResult result);
+bool        ParseJobResult(const std::string &name, JobResult &result);
+
 struct Instruction
 {
     CommandKind kind         = CommandKind::Idle;
     std::string job;
+    std::string params;           // run only: job parameters, "name=value&name" (empty: none)
     long long   pauseSeconds = 0;
     long long   commandId    = 0;
 };
@@ -59,6 +74,12 @@ struct ClientView
     long long   ackCommandId = 0;
     long long   ageSeconds   = 0; // since last contact
     std::string message;
+
+    // The last job that ended (lastJobId 0: none yet)
+    long long   lastJobId     = 0;
+    std::string lastJob;
+    JobResult   lastJobResult = JobResult::None;
+    std::string lastJobMessage;
 };
 
 struct Result
@@ -78,6 +99,12 @@ struct StatusReport
     long long   ackCommandId = 0;
     bool        hasMessage = false;
     std::string message;
+
+    // The last job that ended, sent again with every report: counted once, when lastJobId is new
+    bool        hasLastJob    = false;
+    long long   lastJobId     = 0;
+    std::string lastJob;
+    JobResult   lastJobResult = JobResult::None;
 };
 
 struct Summary
@@ -92,6 +119,7 @@ struct Summary
     unsigned long long commandUpdates    = 0;
     unsigned long long csvLoads          = 0;
     unsigned long long csvLoadFailures   = 0;
+    unsigned long long jobsEnded[JOB_RESULT_COUNT] = { 0 }; // by JobResult (None stays 0)
     long long          uptimeSeconds     = 0;
 };
 
@@ -107,6 +135,11 @@ public:
 
     // Non-empty requestKey makes the call idempotent. isNew tells 201 from 200.
     Result Register(const std::string &requestKey, bool &isNew, ClientView &out);
+
+    // Worker options (--worker-options): one opaque string for every worker, returned with each registration. The
+    // coordinator does not interpret it; a worker takes what it knows (domlem: "switch") and ignores the rest.
+    void        SetWorkerOptions(const std::string &options);
+    std::string WorkerOptions();
 
     // Updates reported state/ack/contact time; returns the current instruction.
     Result ReportStatus(const StatusReport &report, ClientView &out);
@@ -129,6 +162,10 @@ private:
         ClientState state        = ClientState::Registered;
         long long   ackCommandId = 0;
         std::string message;
+        long long   lastJobId     = 0;
+        std::string lastJob;
+        JobResult   lastJobResult = JobResult::None;
+        std::string lastJobMessage;
         std::chrono::steady_clock::time_point lastContact;
     };
 
@@ -136,6 +173,7 @@ private:
 
     std::mutex                            mutex_;
     std::vector<UserRecord>               pool_;
+    std::string                           workerOptions_;
     size_t                                nextFree_ = 0;
     std::map<int, Client>                 clients_;
     std::map<std::string, int>            byKey_;
@@ -146,5 +184,6 @@ private:
     unsigned long long                    commandUpdates_     = 0;
     unsigned long long                    csvLoads_           = 0;
     unsigned long long                    csvLoadFailures_    = 0;
+    unsigned long long                    jobsEnded_[JOB_RESULT_COUNT] = { 0 };
     std::chrono::steady_clock::time_point started_;
 };

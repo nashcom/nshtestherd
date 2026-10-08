@@ -17,7 +17,7 @@ const char *CONTENT_TYPE_METRICS = "text/plain; version=0.0.4; charset=utf-8";
 
 const size_t MAX_KEY_LENGTH     = 128;
 const size_t MAX_JOB_LENGTH     = 128;
-const size_t MAX_MESSAGE_LENGTH = 512;
+const size_t MAX_PARAMS_LENGTH  = 1024;
 const long long MAX_PAUSE_SECONDS = 31536000; // one year
 
 std::string Lower(std::string s)
@@ -75,6 +75,7 @@ void AddInstruction(Fields &f, const Instruction &i)
     f.Add("command", CommandName(i.kind));
     f.Add("command_id", i.commandId);
     f.Add("job", i.job);
+    f.Add("params", i.params);
     f.Add("pause_seconds", i.pauseSeconds);
 }
 
@@ -136,6 +137,31 @@ bool IsValidJob(const std::string &job)
     }
 
     return true;
+}
+
+// Job parameters: the URL style options of the job ("name=value&name"), passed to the worker as they are. No blanks or
+// control characters, so they stay one argument and one line everywhere.
+bool IsValidParams(const std::string &params)
+{
+    return !params.empty() && params.size() <= MAX_PARAMS_LENGTH && IsPrintableAscii(params, false);
+}
+
+// "Authorization: Bearer <token>" with the right token. Compares in constant time, so the answer time does not tell how
+// much of a guess was right.
+bool TokenMatches(const std::string &authorization, const std::string &token)
+{
+    const std::string scheme = "bearer ";
+
+    if (authorization.size() <= scheme.size() || Lower(authorization.substr(0, scheme.size())) != scheme)
+        return false;
+
+    const std::string given = authorization.substr(scheme.size());
+    size_t            diff  = given.size() ^ token.size();
+
+    for (size_t i = 0; i < token.size(); i++)
+        diff |= (size_t)((unsigned char)token[i] ^ (unsigned char)(i < given.size() ? given[i] : 0));
+
+    return 0 == diff;
 }
 
 // Rejects any field not in the allowed list.
@@ -254,6 +280,7 @@ HttpResponse HandleRegister(Herd &herd, const HttpRequest &req)
     f.Add("test_id", (long long)view.testId);
     AddAccount(f, view.user);
     AddInstruction(f, view.instruction);
+    f.Add("worker_options", herd.WorkerOptions());
     return Reply(req, isNew ? 201 : 200, f);
 }
 
@@ -262,7 +289,7 @@ HttpResponse HandleStatusPost(Herd &herd, const HttpRequest &req)
     Form        form;
     std::string err;
 
-    if (!ReadPostForm(req, form, err) || !CheckKeys(form, { "test_id", "state", "ack_command_id", "message" }, err))
+    if (!ReadPostForm(req, form, err) || !CheckKeys(form, { "test_id", "state", "ack_command_id", "message", "last_job_id", "last_job", "last_job_result" }, err))
         return BadRequest(req, err);
 
     StatusReport report;
@@ -289,11 +316,32 @@ HttpResponse HandleStatusPost(Herd &herd, const HttpRequest &req)
 
     if (it != form.end())
     {
-        if (it->second.size() > MAX_MESSAGE_LENGTH)
-            return BadRequest(req, "message is longer than 512 bytes");
+        if (it->second.size() > MAX_STATUS_MESSAGE_BYTES)
+            return BadRequest(req, "message is longer than " + std::to_string(MAX_STATUS_MESSAGE_BYTES) + " bytes");
 
         report.hasMessage = true;
         report.message    = it->second;
+    }
+
+    // The last job that ended: all three fields or none
+    size_t lastJobFields = form.count("last_job_id") + form.count("last_job") + form.count("last_job_result");
+
+    if (0 != lastJobFields)
+    {
+        if (3 != lastJobFields)
+            return BadRequest(req, "last_job_id, last_job and last_job_result go together");
+
+        if (!ParseInt(form["last_job_id"], 1, 2147483647, report.lastJobId))
+            return BadRequest(req, "last_job_id must be a positive integer");
+
+        if (!IsValidJob(form["last_job"]))
+            return BadRequest(req, "last_job must be 1-128 characters of A-Z a-z 0-9 . _ : / -");
+
+        if (!ParseJobResult(form["last_job_result"], report.lastJobResult))
+            return BadRequest(req, "last_job_result must be ok, failed or stopped");
+
+        report.hasLastJob = true;
+        report.lastJob    = form["last_job"];
     }
 
     ClientView view;
@@ -313,7 +361,7 @@ HttpResponse HandleCommand(Herd &herd, const HttpRequest &req)
     Form        form;
     std::string err;
 
-    if (!ReadPostForm(req, form, err) || !CheckKeys(form, { "target", "test_id", "command", "job", "pause_seconds" }, err))
+    if (!ReadPostForm(req, form, err) || !CheckKeys(form, { "target", "test_id", "command", "job", "params", "pause_seconds" }, err))
         return BadRequest(req, err);
 
     bool all = false;
@@ -340,8 +388,9 @@ HttpResponse HandleCommand(Herd &herd, const HttpRequest &req)
     if (name == form.end() || !ParseCommandName(name->second, command.kind))
         return BadRequest(req, "command is required: idle, run, pause or stop");
 
-    auto job   = form.find("job");
-    auto pause = form.find("pause_seconds");
+    auto job    = form.find("job");
+    auto params = form.find("params");
+    auto pause  = form.find("pause_seconds");
 
     if (CommandKind::Run == command.kind)
     {
@@ -349,9 +398,17 @@ HttpResponse HandleCommand(Herd &herd, const HttpRequest &req)
             return BadRequest(req, "run requires job (1-128 characters of A-Z a-z 0-9 . _ : / -)");
 
         command.job = job->second;
+
+        if (params != form.end())
+        {
+            if (!IsValidParams(params->second))
+                return BadRequest(req, "params must be 1-1024 printable ASCII characters without blanks (name=value&name)");
+
+            command.params = params->second;
+        }
     }
-    else if (job != form.end())
-        return BadRequest(req, "job is only valid with command=run");
+    else if (job != form.end() || params != form.end())
+        return BadRequest(req, "job and params are only valid with command=run");
 
     if (CommandKind::Pause == command.kind)
     {
@@ -407,6 +464,10 @@ HttpResponse HandleClientGet(Herd &herd, const HttpRequest &req)
     f.Add("last_contact_seconds", view.ageSeconds);
     f.Add("message", view.message);
     AddInstruction(f, view.instruction);
+    f.Add("last_job_id", view.lastJobId);
+    f.Add("last_job", view.lastJob);
+    f.Add("last_job_result", JobResultName(view.lastJobResult));
+    f.Add("last_job_message", view.lastJobMessage);
     return Reply(req, 200, f);
 }
 
@@ -422,6 +483,9 @@ HttpResponse HandleStatusGet(Herd &herd, const HttpRequest &req)
 
     for (int i = 0; i < STATE_COUNT; i++)
         f.Add(std::string("clients_") + StateName((ClientState)i), (long long)s.byState[i]);
+
+    for (int i = 1; i < JOB_RESULT_COUNT; i++)
+        f.Add(std::string("jobs_") + JobResultName((JobResult)i), (long long)s.jobsEnded[i]);
 
     f.Add("uptime_seconds", s.uptimeSeconds);
     return Reply(req, 200, f);
@@ -462,6 +526,11 @@ HttpResponse HandleMetrics(Herd &herd)
     for (int i = 0; i < STATE_COUNT; i++)
         out += std::string("nshtestherd_clients_by_state{state=\"") + StateName((ClientState)i) + "\"} " + std::to_string(s.byState[i]) + "\n";
 
+    MetricHeader(out, "jobs_ended_total", "counter", "Jobs that ended, by result (counted once per job).");
+
+    for (int i = 1; i < JOB_RESULT_COUNT; i++)
+        out += std::string("nshtestherd_jobs_ended_total{result=\"") + JobResultName((JobResult)i) + "\"} " + std::to_string(s.jobsEnded[i]) + "\n";
+
     Metric(out, "uptime_seconds", "gauge", "Seconds since the coordinator started.", (unsigned long long)s.uptimeSeconds);
     Metric(out, "registrations_total", "counter", "New account allocations.", s.registrations);
     Metric(out, "allocation_failures_total", "counter", "Registrations rejected because no account was available.", s.allocationFailures);
@@ -478,8 +547,16 @@ HttpResponse HandleMetrics(Herd &herd)
 
 } // namespace
 
-HttpResponse HandleRequest(Herd &herd, const HttpRequest &req)
+HttpResponse HandleRequest(Herd &herd, const HttpRequest &req, const std::string &token)
 {
+    // With a token everything but the health check needs it, before anything else is looked at
+    if (!token.empty() && "/health" != req.path && !TokenMatches(req.authorization, token))
+    {
+        HttpResponse r  = Fail(req, 401, "unauthorized", "missing or wrong token (Authorization: Bearer <token>)");
+        r.authChallenge = true;
+        return r;
+    }
+
     struct Route
     {
         const char *path;

@@ -101,7 +101,8 @@ STATUS RegEnsureUser (const DomRegSetup *pSetup,
                       const char         *pszShortName,
                       const char         *pszInternetAddress,
                       char               *pszRetUserName,
-                      WORD                wMaxUserName)
+                      WORD                wMaxUserName,
+                      BOOL               *pbRetCreated)
 {
     STATUS     error    = NOERROR;
     HCERTIFIER hCertCtx = NULLHANDLE;
@@ -128,6 +129,9 @@ STATUS RegEnsureUser (const DomRegSetup *pSetup,
 
     const char *pszMailDir = NULL;
     int         nLen       = 0;
+
+    if (pbRetCreated)
+        *pbRetCreated = FALSE;
 
     if ((NULL == pSetup) || (NULL == pszRetUserName) || (0 == wMaxUserName))
     {
@@ -242,9 +246,12 @@ STATUS RegEnsureUser (const DomRegSetup *pSetup,
 
     if (ERR_REG_ADDRBOOK_ENTRY_EXISTS == ERR (error))
     {
-        /* Created by somebody else in the meantime: that is fine */
+        /* Created by somebody else in the meantime: that is fine, but its ID may not be in the vault yet either */
         AddInLogMessageText ("%s: User [%s] exists already", NOERROR, g_szLogPrefix, szFullName);
         error = NOERROR;
+
+        if (pbRetCreated)
+            *pbRetCreated = TRUE;
     }
     else if (error)
     {
@@ -254,6 +261,9 @@ STATUS RegEnsureUser (const DomRegSetup *pSetup,
     else
     {
         AddInLogMessageText ("%s: User registered: [%s], mail file [%s] on [%s]", NOERROR, g_szLogPrefix, szFullName, szMailFile, szMailServer);
+
+        if (pbRetCreated)
+            *pbRetCreated = TRUE;
     }
 
     CopyStr (pszRetUserName, wMaxUserName, szFullName);
@@ -274,6 +284,9 @@ Done:
         SECKFMFreeCertifierCtx (hCertCtx);
         hCertCtx = NULLHANDLE;
     }
+
+    /* The password does not stay on the stack */
+    memset (szPassword, 0, sizeof (szPassword));
 
     return error;
 }

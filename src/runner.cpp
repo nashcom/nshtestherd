@@ -14,10 +14,16 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <random>
 #include <thread>
+
+// The environment variables (and argument placeholders) of a child: NSHTEST_<NAME>. The old names NSH_<NAME> are set as
+// well, for programs written before the rename (deprecated).
+#define ENV_PREFIX     "NSHTEST_"
+#define OLD_ENV_PREFIX "NSH_"
 
 namespace
 {
@@ -42,6 +48,12 @@ enum RegState
 
 // Hard cap on logical clients (one thread each), also for fill mode
 const int MAX_CLIENTS = 1000;
+
+// The account password must never become a program argument, under either name
+bool IsPasswordName(const std::string &name)
+{
+    return std::string(ENV_PREFIX) + "PASSWORD" == name || std::string(OLD_ENV_PREFIX) + "PASSWORD" == name;
+}
 
 // What is specific to the generic runner: how to wait, how to log, and what a "run" command does
 // (start a child process, or the built-in dummy job when no program is given).
@@ -105,23 +117,32 @@ bool RunnerHooks::JobStart(const HerdJobContext &context, std::string &message, 
 
     if (config_.program.empty())
     {
-        message = "dummy job " + job_;
+        message = "dummy job " + job_ + (context.params.empty() ? "" : " (" + context.params + ")");
         return true;
     }
 
     const HerdAccount &a = context.account;
+    EnvList            env;
 
-    EnvList env = {
-        { "NSH_TEST_ID", a.testId },
-        { "NSH_FIRSTNAME", a.firstName },
-        { "NSH_LASTNAME", a.lastName },
-        { "NSH_PASSWORD", a.password },
-        { "NSH_SHORTNAME", a.shortName },
-        { "NSH_INTERNETADDRESS", a.internetAddress },
-        { "NSH_JOB", context.job },
-        { "NSH_COMMAND_ID", std::to_string(context.commandId) },
-        { "NSH_SERVER", context.serverUrl },
+    // NSHTEST_<name>, and for programs written before the rename also the old NSH_<name> (deprecated)
+    auto add = [&](const char *name, const std::string &value, bool oldName)
+    {
+        env.push_back({ std::string(ENV_PREFIX) + name, value });
+
+        if (oldName)
+            env.push_back({ std::string(OLD_ENV_PREFIX) + name, value });
     };
+
+    add("TEST_ID", a.testId, true);
+    add("FIRSTNAME", a.firstName, true);
+    add("LASTNAME", a.lastName, true);
+    add("PASSWORD", a.password, true);
+    add("SHORTNAME", a.shortName, true);
+    add("INTERNETADDRESS", a.internetAddress, true);
+    add("JOB", context.job, true);
+    add("PARAMS", context.params, false);    // new: there never was an NSH_PARAMS
+    add("COMMAND_ID", std::to_string(context.commandId), true);
+    add("SERVER", context.serverUrl, true);
 
     // The environment always carries everything. The arguments may use placeholders for all of it
     // except the password.
@@ -129,7 +150,7 @@ bool RunnerHooks::JobStart(const HerdJobContext &context, std::string &message, 
 
     for (const auto &kv : env)
     {
-        if ("NSH_PASSWORD" != kv.first)
+        if (!IsPasswordName(kv.first))
             values.push_back(kv);
     }
 
@@ -186,7 +207,8 @@ bool ExpandArgTemplate(const std::string &arg, const EnvList &values, std::strin
 
     while (pos < arg.size())
     {
-        size_t open = arg.find("{NSH_", pos);
+        // {NSHTEST_NAME}, or the old {NSH_NAME}: both start with "{NSH"
+        size_t open = arg.find("{NSH", pos);
 
         if (std::string::npos == open)
         {
@@ -200,8 +222,10 @@ bool ExpandArgTemplate(const std::string &arg, const EnvList &values, std::strin
         if (std::string::npos != close)
             name = arg.substr(open + 1, close - open - 1);
 
-        // Not a complete placeholder (no closing brace, or other characters inside): literal text
-        if (name.empty() || std::string::npos != name.find_first_not_of(nameChars))
+        // Not a complete placeholder (no closing brace, another prefix, or other characters inside): literal text
+        bool prefixed = (0 == name.compare(0, std::strlen(ENV_PREFIX), ENV_PREFIX)) || (0 == name.compare(0, std::strlen(OLD_ENV_PREFIX), OLD_ENV_PREFIX));
+
+        if (!prefixed || std::string::npos != name.find_first_not_of(nameChars))
         {
             out.append(arg, pos, open + 1 - pos);
             pos = open + 1;
@@ -210,10 +234,10 @@ bool ExpandArgTemplate(const std::string &arg, const EnvList &values, std::strin
 
         out.append(arg, pos, open - pos);
 
-        if ("NSH_PASSWORD" == name)
+        if (IsPasswordName(name))
         {
-            err = "{NSH_PASSWORD} is not allowed in program arguments (it would be visible in the process list); "
-                  "read the environment variable NSH_PASSWORD instead";
+            err = "{" + name + "} is not allowed in program arguments (it would be visible in the process list); "
+                  "read the environment variable " ENV_PREFIX "PASSWORD instead";
             return false;
         }
 
@@ -245,11 +269,13 @@ bool ValidateArgTemplates(const std::vector<std::string> &args, std::string &err
 {
     EnvList values;
 
-    for (const char *name : { "NSH_TEST_ID", "NSH_FIRSTNAME", "NSH_LASTNAME", "NSH_SHORTNAME", "NSH_INTERNETADDRESS",
-                              "NSH_JOB", "NSH_COMMAND_ID", "NSH_SERVER" })
+    for (const char *name : { "TEST_ID", "FIRSTNAME", "LASTNAME", "SHORTNAME", "INTERNETADDRESS", "JOB", "COMMAND_ID", "SERVER" })
     {
-        values.push_back({ name, "x" });
+        values.push_back({ std::string(ENV_PREFIX) + name, "x" });
+        values.push_back({ std::string(OLD_ENV_PREFIX) + name, "x" });
     }
+
+    values.push_back({ std::string(ENV_PREFIX) + "PARAMS", "x" });
 
     for (const std::string &a : args)
     {
@@ -319,6 +345,7 @@ int RunRunner(const RunnerConfig &config, const std::atomic<bool> &stop)
                 clientConfig.requestKey   = std::string(runId) + "-" + std::to_string(i + 1);
                 clientConfig.name         = "runner";
                 clientConfig.pollMs       = config.pollMs;
+                clientConfig.token        = config.token;
                 // Spread start-up so many clients do not hit the coordinator in one burst
                 // (fill mode registers one client at a time already)
                 clientConfig.startDelayMs = fill ? 0 : ((i + 1) % 200) * 5;

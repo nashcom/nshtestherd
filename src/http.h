@@ -23,6 +23,7 @@ struct HttpRequest
     std::string query; // raw, without '?'
     std::string contentType;
     std::string accept;
+    std::string authorization; // the Authorization header as sent (never logged)
     std::string body;
 };
 
@@ -31,7 +32,8 @@ struct HttpResponse
     int         status      = 200;
     std::string contentType = "text/plain; charset=utf-8";
     std::string body;
-    std::string allow; // set on 405
+    std::string allow;         // set on 405
+    bool        authChallenge = false; // 401: send WWW-Authenticate: Bearer
 };
 
 typedef std::function<HttpResponse(const HttpRequest &)> RequestHandler;

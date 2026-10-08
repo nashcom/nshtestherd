@@ -1,4 +1,5 @@
 # Build outputs (make)
+.build-id
 *.o
 *.obj
 *.d

@@ -21,4 +21,6 @@ struct HttpReply
 
 // formBody is sent as application/x-www-form-urlencoded (POST only).
 // Connect and I/O are bounded by timeoutSeconds. Returns false on transport errors.
-bool HttpCall(const HttpUrl &url, const std::string &method, const std::string &pathAndQuery, const std::string &formBody, HttpReply &reply, std::string &err, int timeoutSeconds = 10);
+// bearerToken: when not empty, sent as "Authorization: Bearer <token>".
+bool HttpCall(const HttpUrl &url, const std::string &method, const std::string &pathAndQuery, const std::string &formBody, HttpReply &reply, std::string &err,
+              int timeoutSeconds = 10, const std::string &bearerToken = std::string());

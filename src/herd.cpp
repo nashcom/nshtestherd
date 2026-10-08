@@ -7,6 +7,8 @@ namespace
 
 const char *STATE_NAMES[STATE_COUNT] = { "registered", "idle", "running", "paused", "stopping", "done", "error" };
 
+const char *JOB_RESULT_NAMES[JOB_RESULT_COUNT] = { "", "ok", "failed", "stopped" };
+
 Result Fail(int code, const char *error, const std::string &message)
 {
     Result r;
@@ -67,6 +69,26 @@ bool ParseCommandName(const std::string &name, CommandKind &kind)
     return false;
 }
 
+const char *JobResultName(JobResult result)
+{
+    return JOB_RESULT_NAMES[(int)result];
+}
+
+// A worker reports only real results: "ok", "failed" or "stopped"
+bool ParseJobResult(const std::string &name, JobResult &result)
+{
+    for (int i = 1; i < JOB_RESULT_COUNT; i++)
+    {
+        if (name == JOB_RESULT_NAMES[i])
+        {
+            result = (JobResult)i;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 Herd::Herd() : started_(std::chrono::steady_clock::now())
 {
 }
@@ -80,6 +102,10 @@ ClientView Herd::ViewOf(int testId, const Client &client) const
     v.state        = client.state;
     v.ackCommandId = client.ackCommandId;
     v.message      = client.message;
+    v.lastJobId      = client.lastJobId;
+    v.lastJob        = client.lastJob;
+    v.lastJobResult  = client.lastJobResult;
+    v.lastJobMessage = client.lastJobMessage;
     v.ageSeconds   = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - client.lastContact).count();
     return v;
 }
@@ -164,6 +190,18 @@ Result Herd::Register(const std::string &requestKey, bool &isNew, ClientView &ou
     return Result();
 }
 
+void Herd::SetWorkerOptions(const std::string &options)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    workerOptions_ = options;
+}
+
+std::string Herd::WorkerOptions()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return workerOptions_;
+}
+
 Result Herd::ReportStatus(const StatusReport &report, ClientView &out)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -178,6 +216,9 @@ Result Herd::ReportStatus(const StatusReport &report, ClientView &out)
     if (report.hasAck && report.ackCommandId > c.instruction.commandId)
         return Fail(400, "invalid_ack_command_id", "ack_command_id is newer than the issued command_id");
 
+    if (report.hasLastJob && report.lastJobId > c.instruction.commandId)
+        return Fail(400, "invalid_last_job_id", "last_job_id is newer than the issued command_id");
+
     c.lastContact = std::chrono::steady_clock::now();
     statusReports_++;
 
@@ -191,6 +232,16 @@ Result Herd::ReportStatus(const StatusReport &report, ClientView &out)
 
         if (report.hasMessage)
             c.message = report.message;
+
+        // The worker repeats its last result with every report: only a newer job counts (once)
+        if (report.hasLastJob && report.lastJobId > c.lastJobId)
+        {
+            c.lastJobId      = report.lastJobId;
+            c.lastJob        = report.lastJob;
+            c.lastJobResult  = report.lastJobResult;
+            c.lastJobMessage = report.hasMessage ? report.message : std::string();
+            jobsEnded_[(int)report.lastJobResult]++;
+        }
     }
 
     out = ViewOf(it->first, c);
@@ -208,6 +259,7 @@ Result Herd::SetCommand(bool all, int testId, const Instruction &command, size_t
     {
         c.instruction.kind         = command.kind;
         c.instruction.job          = (CommandKind::Run == command.kind) ? command.job : std::string();
+        c.instruction.params       = (CommandKind::Run == command.kind) ? command.params : std::string();
         c.instruction.pauseSeconds = (CommandKind::Pause == command.kind) ? command.pauseSeconds : 0;
         c.instruction.commandId++;
         commandUpdates_++;
@@ -267,6 +319,10 @@ Summary Herd::GetSummary()
     s.commandUpdates    = commandUpdates_;
     s.csvLoads          = csvLoads_;
     s.csvLoadFailures   = csvLoadFailures_;
+
+    for (int i = 0; i < JOB_RESULT_COUNT; i++)
+        s.jobsEnded[i] = jobsEnded_[i];
+
     s.uptimeSeconds     = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started_).count();
 
     for (const auto &entry : clients_)

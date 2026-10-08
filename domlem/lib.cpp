@@ -8,6 +8,12 @@
 
 #include <random>
 
+#ifdef UNIX
+#include <dirent.h>
+#include <signal.h>
+#include <sys/types.h>
+#endif
+
 #include <global.h>
 #include <addin.h>
 #include <lookup.h>
@@ -24,6 +30,7 @@
 #include <fontid.h>
 #include <easycd.h>
 #include <osmisc.h>
+#include <osfile.h>
 
 #include "lib.h"
 
@@ -86,6 +93,84 @@ BOOL IsSafeName (const char *pszName, size_t nMaxLen)
 Done:
 
     return IsNullStr (pszName) ? FALSE : bSafe;
+}
+
+
+/* The process id in the name of a domlem temporary file: "domlem_att_<pid>_<mail>_<n>.tmp" or "domlem_<test_id>_<pid>.id".
+ * FALSE for any other name. */
+
+static BOOL TempFilePid (const char *pszName, DWORD *pdwPid)
+{
+    BOOL        bOK   = FALSE;
+    std::string Name  = pszName ? pszName : "";
+    size_t      nFrom = std::string::npos;
+    size_t      nTo   = std::string::npos;
+
+    if ((0 == Name.compare (0, 11, "domlem_att_")) && (Name.size() > 15) && (0 == Name.compare (Name.size() - 4, 4, ".tmp")))
+    {
+        nFrom = 11;
+        nTo   = Name.find ('_', nFrom);
+    }
+    else if ((0 == Name.compare (0, 7, "domlem_")) && (Name.size() > 10) && (0 == Name.compare (Name.size() - 3, 3, ".id")))
+    {
+        nTo   = Name.size() - 3;
+        nFrom = Name.rfind ('_', nTo);
+
+        if (std::string::npos != nFrom)
+            nFrom++;
+    }
+
+    if ((std::string::npos == nFrom) || (std::string::npos == nTo) || (nTo <= nFrom))
+        goto Done;
+
+    bOK = ParseUnsigned (Name.substr (nFrom, nTo - nFrom).c_str(), 0xFFFFFFFF, pdwPid) && (*pdwPid > 1);
+
+Done:
+
+    return bOK;
+}
+
+
+void RemoveStaleTempFiles()
+{
+#ifdef UNIX
+    DIR           *pDir      = NULL;
+    struct dirent *pEntry    = NULL;
+    DWORD          dwPid     = 0;
+    DWORD          dwRemoved = 0;
+    char           szDir[MAXPATH+1]      = {0};
+    char           szPath[MAXPATH*2+2]   = {0};
+
+    OSGetDataDirectory (szDir);
+
+    pDir = opendir (szDir);
+
+    if (NULL == pDir)
+        goto Done;
+
+    while (NULL != (pEntry = readdir (pDir)))
+    {
+        if (!TempFilePid (pEntry->d_name, &dwPid) || ((unsigned long) dwPid == DOMLEM_GETPID()))
+            continue;
+
+        /* The process is alive (or belongs to somebody else: EPERM): not ours to remove */
+        if ((0 == kill ((pid_t) dwPid, 0)) || (ESRCH != errno))
+            continue;
+
+        snprintf (szPath, sizeof (szPath), "%s/%s", szDir, pEntry->d_name);
+
+        if (0 == remove (szPath))
+            dwRemoved++;
+    }
+
+    if (dwRemoved)
+        AddInLogMessageText ("%s: Removed %lu temporary files left by lemmings that ended without cleaning up", NOERROR, g_szLogPrefix, (unsigned long) dwRemoved);
+
+Done:
+
+    if (pDir)
+        closedir (pDir);
+#endif
 }
 
 
@@ -324,6 +409,70 @@ Done:
 }
 
 
+BOOL LookupMailFile (const char *pszServer, const char *pszUserName, char *pszRetMailServer, WORD wMaxMailServer, char *pszRetMailFile, WORD wMaxMailFile)
+{
+    DHANDLE hLookup    = NULLHANDLE;
+    char   *pLookup    = NULL;
+    char   *pName      = NULL;
+    char   *pMatch     = NULL;
+    WORD    wMatches   = 0;
+    BOOL    bFound     = FALSE;
+    char    szItems[]  = "MailServer\0MailFile";    /* the items to return, in this order, each ended by \0 */
+
+    if ((NULL == pszRetMailServer) || (0 == wMaxMailServer) || (NULL == pszRetMailFile) || (0 == wMaxMailFile))
+        goto Done;
+
+    *pszRetMailServer = '\0';
+    *pszRetMailFile   = '\0';
+
+    if (IsNullStr (pszUserName))
+        goto Done;
+
+    if (NOERROR != NAMELookup (pszServer, NAME_LOOKUP_ALL | NAME_LOOKUP_NOSEARCHING, 1, USERNAMESSPACE, 1, pszUserName, 2, szItems, &hLookup))
+    {
+        hLookup = NULLHANDLE;
+        goto Done;
+    }
+
+    pLookup = (char *) OSLockObject (hLookup);
+
+    if (NULL == pLookup)
+        goto Done;
+
+    pName = (char *) NAMELocateNextName (pLookup, NULL, &wMatches);
+
+    if ((NULL == pName) || (0 == wMatches))
+        goto Done;
+
+    pMatch = (char *) NAMELocateNextMatch (pLookup, pName, pMatch);
+
+    if (NULL == pMatch)
+        goto Done;
+
+    /* Item 0: MailServer (may be empty), item 1: MailFile (required) */
+    if (NOERROR != NAMEGetTextItem (pMatch, 0, 0, pszRetMailServer, (WORD) (wMaxMailServer - 1)))
+        *pszRetMailServer = '\0';
+
+    if ((NOERROR != NAMEGetTextItem (pMatch, 1, 0, pszRetMailFile, (WORD) (wMaxMailFile - 1))) || ('\0' == *pszRetMailFile))
+    {
+        *pszRetMailFile = '\0';
+        goto Done;
+    }
+
+    bFound = TRUE;
+
+Done:
+
+    if (pLookup)
+        OSUnlockObject (hLookup);
+
+    if (hLookup)
+        OSMemFree (hLookup);
+
+    return bFound;
+}
+
+
 /* NSFSearch callback: adds the note ID of every note that matches the formula to the ID table (parameter: DHANDLE *) */
 
 static STATUS AddIDUnique (void *phNoteIDTable, SEARCH_MATCH *pSearchInfo, ITEM_TABLE *pSummaryInfo)
@@ -334,12 +483,16 @@ static STATUS AddIDUnique (void *phNoteIDTable, SEARCH_MATCH *pSearchInfo, ITEM_
     SEARCH_MATCH SearchMatch  = {0};
 
     if (NULL == pSearchInfo)
-        return ERR_MISC_INVALID_ARGS;
+    {
+        error = ERR_MISC_INVALID_ARGS;
+        goto Done;
+    }
 
     memcpy ((char *) (&SearchMatch), (char *) pSearchInfo, sizeof (SEARCH_MATCH));
 
+    /* Only notes that match the formula */
     if (!(SearchMatch.SERetFlags & SE_FMATCH))
-        return NOERROR;
+        goto Done;
 
     if (phNoteIDTable)
     {
@@ -348,6 +501,8 @@ static STATUS AddIDUnique (void *phNoteIDTable, SEARCH_MATCH *pSearchInfo, ITEM_
         if (hNoteIDTable)
             error = IDInsert (hNoteIDTable, SearchMatch.ID.NoteID, &bInserted);
     }
+
+Done:
 
     return ERR (error);
 }

@@ -87,9 +87,10 @@ struct TestServer
     Herd         herd;
     HttpServer   server;
     std::thread  thread;
+    std::string  token;   // set before Start(): every call but /health then needs it
 
     explicit TestServer(int port)
-        : server(MakeConfig(port), [this](const HttpRequest &r) { return HandleRequest(herd, r); })
+        : server(MakeConfig(port), [this](const HttpRequest &r) { return HandleRequest(herd, r, token); })
     {
     }
 
@@ -378,7 +379,10 @@ static void TestExternalProgram()
 
     RunnerConfig cfg = MakeRunner(1);
     cfg.program      = "/bin/sh";
-    cfg.programArgs  = { "-c", "echo run >> \"$HERD_TEST_COUNT\"; test \"$NSH_SHORTNAME\" = load1 && test \"$NSH_PASSWORD\" = TestPw && test \"$NSH_JOB\" = envjob && test \"$NSH_COMMAND_ID\" = 1 && test \"$NSH_TEST_ID\" = 1" };
+    // The NSHTEST_* names, the job parameters, and the old NSH_* names that are still set for older programs
+    cfg.programArgs  = { "-c", "echo run >> \"$HERD_TEST_COUNT\"; test \"$NSHTEST_SHORTNAME\" = load1 && test \"$NSHTEST_PASSWORD\" = TestPw && "
+                               "test \"$NSHTEST_JOB\" = envjob && test \"$NSHTEST_PARAMS\" = 'a=1&b=2' && test \"$NSHTEST_COMMAND_ID\" = 1 && "
+                               "test \"$NSHTEST_TEST_ID\" = 1 && test \"$NSH_SHORTNAME\" = load1 && test \"$NSH_PASSWORD\" = TestPw" };
 
     std::atomic<bool> stop(false);
     int               rc = -1;
@@ -386,8 +390,8 @@ static void TestExternalProgram()
 
     CHECK(WaitFor([]() { return Call("GET", "/status")["clients_total"] == "1"; }, 10000));
 
-    // Successful child: account and job arrive via environment, client returns to idle
-    Call("POST", "/command", "test_id=1&command=run&job=envjob");
+    // Successful child: account, job and parameters arrive via environment, client returns to idle
+    Call("POST", "/command", "test_id=1&command=run&job=envjob&params=a%3D1%26b%3D2");
     CHECK(WaitFor([]() { Form c = Client(1); return c["state"] == "idle" && c["ack_command_id"] == "1" && c["message"].find("finished (exit 0)") != std::string::npos; }, 10000));
 
     // Already acknowledged command id: the finished child must not be restarted
@@ -405,12 +409,19 @@ static void TestExternalProgram()
     CHECK(1 == lines);
     CHECK("idle" == Client(1)["state"]);
 
-    // A new run command is a new execution; this one fails (NSH_JOB mismatch) -> error, runner exits 1
+    // A new run command is a new execution; this one fails (job and parameters mismatch): reported as failed, the client
+    // stays idle and waits for work
     Call("POST", "/command", "test_id=1&command=run&job=otherjob");
-    CHECK(WaitFor([]() { return Client(1)["state"] == "error"; }, 10000));
-    CHECK(Client(1)["message"].find("failed (exit 1)") != std::string::npos);
+    CHECK(WaitFor([]() { Form c = Client(1); return c["state"] == "idle" && c["last_job_id"] == "2"; }, 10000));
+    Form failed = Client(1);
+    CHECK("otherjob" == failed["last_job"] && "failed" == failed["last_job_result"]);
+    CHECK(failed["last_job_message"].find("failed (exit 1)") != std::string::npos);
+    CHECK("1" == Call("GET", "/status")["jobs_ok"] && "1" == Call("GET", "/status")["jobs_failed"]);
+
+    Call("POST", "/command", "test_id=1&command=stop");
+    CHECK(WaitFor([]() { return Client(1)["state"] == "done"; }, 10000));
     rt.join();
-    CHECK(1 == rc);
+    CHECK(0 == rc);
 
     std::remove(countFile.c_str());
 }
@@ -431,9 +442,12 @@ static void TestMissingProgram()
 
     CHECK(WaitFor([]() { return Call("GET", "/status")["clients_total"] == "1"; }, 10000));
     Call("POST", "/command", "test_id=1&command=run&job=x");
-    CHECK(WaitFor([]() { return Client(1)["state"] == "error"; }, 10000));
+    CHECK(WaitFor([]() { Form c = Client(1); return c["state"] == "idle" && c["last_job_result"] == "failed"; }, 10000));
+
+    Call("POST", "/command", "test_id=1&command=stop");
+    CHECK(WaitFor([]() { return Client(1)["state"] == "done"; }, 10000));
     rt.join();
-    CHECK(1 == rc);
+    CHECK(0 == rc);
 }
 
 // The placeholders really arrive as arguments of the child (and the environment is still passed as well)
@@ -446,8 +460,9 @@ static void TestTemplatedChild()
 
     RunnerConfig cfg = MakeRunner(1);
     cfg.program      = "/bin/sh";
-    cfg.programArgs  = { "-c", "test \"$#\" = 3 && test \"$1\" = load1 && test \"$2\" = tpljob && test \"$3\" = 1 && test \"$NSH_SHORTNAME\" = load1",
-                         "sh", "{NSH_SHORTNAME}", "{NSH_JOB}", "{NSH_TEST_ID}" };
+    // The last placeholder uses the old name: it must still work
+    cfg.programArgs  = { "-c", "test \"$#\" = 3 && test \"$1\" = load1 && test \"$2\" = tpljob && test \"$3\" = 1 && test \"$NSHTEST_SHORTNAME\" = load1",
+                         "sh", "{NSHTEST_SHORTNAME}", "{NSHTEST_JOB}", "{NSH_TEST_ID}" };
 
     std::atomic<bool> stop(false);
     int               rc = -1;
@@ -465,44 +480,52 @@ static void TestTemplatedChild()
 
 #endif
 
-// {NSH_...} placeholders in the program arguments (pure string handling, no processes)
+// {NSHTEST_...} placeholders in the program arguments (pure string handling, no processes)
 static void TestArgTemplates()
 {
     EnvList values = {
-        { "NSH_TEST_ID", "7" },
-        { "NSH_SHORTNAME", "load000007" },
-        { "NSH_JOB", "mail read" },
+        { "NSHTEST_TEST_ID", "7" },
+        { "NSHTEST_SHORTNAME", "load000007" },
+        { "NSHTEST_JOB", "mail read" },
+        { "NSH_SHORTNAME", "load000007" },     // the old name, still set by the runner
     };
 
     std::string out;
     std::string err;
 
-    CHECK(ExpandArgTemplate("--user={NSH_SHORTNAME}", values, out, err) && "--user=load000007" == out);
-    CHECK(ExpandArgTemplate("{NSH_TEST_ID}-{NSH_SHORTNAME}-{NSH_TEST_ID}", values, out, err) && "7-load000007-7" == out);
+    CHECK(ExpandArgTemplate("--user={NSHTEST_SHORTNAME}", values, out, err) && "--user=load000007" == out);
+    CHECK(ExpandArgTemplate("{NSHTEST_TEST_ID}-{NSHTEST_SHORTNAME}-{NSHTEST_TEST_ID}", values, out, err) && "7-load000007-7" == out);
     CHECK(ExpandArgTemplate("no placeholder", values, out, err) && "no placeholder" == out);
+    CHECK(ExpandArgTemplate("--user={NSH_SHORTNAME}", values, out, err) && "--user=load000007" == out);   // old name
 
     // a value with a space stays inside its single argument
-    CHECK(ExpandArgTemplate("{NSH_JOB}", values, out, err) && "mail read" == out);
+    CHECK(ExpandArgTemplate("{NSHTEST_JOB}", values, out, err) && "mail read" == out);
 
-    // anything that is not a complete {NSH_NAME} stays literal (JSON, shell-like text, lone braces)
+    // anything that is not a complete {NSHTEST_NAME} (or old {NSH_NAME}) stays literal (JSON, shell-like text, lone braces)
     CHECK(ExpandArgTemplate("{\"a\":1}", values, out, err) && "{\"a\":1}" == out);
-    CHECK(ExpandArgTemplate("{NSH_ open", values, out, err) && "{NSH_ open" == out);
-    CHECK(ExpandArgTemplate("{NSH_lower}", values, out, err) && "{NSH_lower}" == out);
-    CHECK(ExpandArgTemplate("$NSH_SHORTNAME", values, out, err) && "$NSH_SHORTNAME" == out); // shell syntax is not ours
+    CHECK(ExpandArgTemplate("{NSHTEST_ open", values, out, err) && "{NSHTEST_ open" == out);
+    CHECK(ExpandArgTemplate("{NSHTEST_lower}", values, out, err) && "{NSHTEST_lower}" == out);
+    CHECK(ExpandArgTemplate("{NSHX}", values, out, err) && "{NSHX}" == out);
+    CHECK(ExpandArgTemplate("{NSHOTHER_NAME}", values, out, err) && "{NSHOTHER_NAME}" == out);           // another prefix
+    CHECK(ExpandArgTemplate("$NSHTEST_SHORTNAME", values, out, err) && "$NSHTEST_SHORTNAME" == out);     // shell syntax is not ours
 
     // values are inserted as they are, not expanded a second time
-    EnvList tricky = { { "NSH_JOB", "{NSH_TEST_ID}" }, { "NSH_TEST_ID", "7" } };
-    CHECK(ExpandArgTemplate("{NSH_JOB}", tricky, out, err) && "{NSH_TEST_ID}" == out);
+    EnvList tricky = { { "NSHTEST_JOB", "{NSHTEST_TEST_ID}" }, { "NSHTEST_TEST_ID", "7" } };
+    CHECK(ExpandArgTemplate("{NSHTEST_JOB}", tricky, out, err) && "{NSHTEST_TEST_ID}" == out);
 
     // errors
-    CHECK(!ExpandArgTemplate("{NSH_UNKNOWN}", values, out, err) && err.find("unknown placeholder") != std::string::npos);
+    CHECK(!ExpandArgTemplate("{NSHTEST_UNKNOWN}", values, out, err) && err.find("unknown placeholder") != std::string::npos);
+    CHECK(!ExpandArgTemplate("--pw={NSHTEST_PASSWORD}", values, out, err) && err.find("not allowed") != std::string::npos);
     CHECK(!ExpandArgTemplate("--pw={NSH_PASSWORD}", values, out, err) && err.find("not allowed") != std::string::npos);
 
-    // startup validation knows every documented name, and refuses the rest
-    std::vector<std::string> good = { "{NSH_TEST_ID}", "{NSH_FIRSTNAME}", "{NSH_LASTNAME}", "{NSH_SHORTNAME}", "{NSH_INTERNETADDRESS}",
-                                      "{NSH_JOB}", "{NSH_COMMAND_ID}", "{NSH_SERVER}", "plain" };
+    // startup validation knows every documented name (new and old), and refuses the rest
+    std::vector<std::string> good = { "{NSHTEST_TEST_ID}", "{NSHTEST_FIRSTNAME}", "{NSHTEST_LASTNAME}", "{NSHTEST_SHORTNAME}",
+                                      "{NSHTEST_INTERNETADDRESS}", "{NSHTEST_JOB}", "{NSHTEST_PARAMS}", "{NSHTEST_COMMAND_ID}",
+                                      "{NSHTEST_SERVER}", "{NSH_SHORTNAME}", "{NSH_TEST_ID}", "{NSH_JOB}", "plain" };
     CHECK(ValidateArgTemplates(good, err));
-    CHECK(!ValidateArgTemplates({ "--x", "{NSH_TYPO}" }, err));
+    CHECK(!ValidateArgTemplates({ "--x", "{NSHTEST_TYPO}" }, err));
+    CHECK(!ValidateArgTemplates({ "{NSH_PARAMS}" }, err));        // new, so only under the new name
+    CHECK(!ValidateArgTemplates({ "{NSHTEST_PASSWORD}" }, err));
     CHECK(!ValidateArgTemplates({ "{NSH_PASSWORD}" }, err));
 }
 
@@ -515,12 +538,29 @@ public:
     std::atomic<int>  steps;
     std::atomic<int>  failAfter;   // fail the job at this step; 0: never
     std::atomic<bool> setupFails;
+    std::atomic<bool> longMessage;  // job steps report a message over the coordinator's limit
     std::atomic<int>  waiting;      // calls of Waiting()
+    std::atomic<int>  aborts;       // calls of JobAbort()
+    std::atomic<int>  stateChanges; // calls of StateChanged()
     std::string       waitReason;   // written by the client thread: read it after join()
     std::string       registeredAs; // written by the client thread: read it after join()
     std::string       startedJob;
+    std::string       startedParams; // written by the client thread: read it after join()
+    std::string       workerOptions; // written by the client thread: read it after join()
+    std::string       lastState;    // written by the client thread: read it after join()
 
-    CustomHooks() : stop(false), steps(0), failAfter(0), setupFails(false), waiting(0) {}
+    CustomHooks() : stop(false), steps(0), failAfter(0), setupFails(false), longMessage(false), waiting(0), aborts(0), stateChanges(0) {}
+
+    void StateChanged(const std::string &state, const std::string &) override
+    {
+        lastState = state;
+        stateChanges++;
+    }
+
+    void JobAbort() override
+    {
+        aborts++;
+    }
 
     void Waiting(const std::string &reason) override
     {
@@ -534,7 +574,8 @@ public:
 
     bool Registered(const HerdAccount &account, std::string &err) override
     {
-        registeredAs = account.shortName;
+        registeredAs  = account.shortName;
+        workerOptions = account.workerOptions;
 
         if (setupFails)
         {
@@ -547,8 +588,9 @@ public:
 
     bool JobStart(const HerdJobContext &context, std::string &message, std::string &) override
     {
-        startedJob = context.job;
-        message    = "custom " + context.job;
+        startedJob    = context.job;
+        startedParams = context.params;
+        message       = "custom " + context.job;
         return true;
     }
 
@@ -556,6 +598,10 @@ public:
     {
         int n   = ++steps;
         message = "step " + std::to_string(n);
+
+        // One byte less than the limit, then a two byte UTF-8 character across it
+        if (longMessage)
+            message = std::string(MAX_STATUS_MESSAGE_BYTES - 1, 'x') + "\xC3\xA4";
 
         if (failAfter > 0 && n >= failAfter)
             return HERD_JOB_FAILED;
@@ -574,10 +620,11 @@ static HerdClientConfig CustomConfig(const char *key)
     return c;
 }
 
-// register, run, pause (the steps must stand still), resume, stop
+// register (with worker options), run, pause (the steps must stand still), resume, stop
 static void TestHerdClientHooks()
 {
     TestServer srv(g_url.port);
+    srv.herd.SetWorkerOptions("switch&other=1");
 
     if (!srv.Start(3))
         exit(0);
@@ -589,7 +636,7 @@ static void TestHerdClientHooks()
 
     CHECK(WaitFor([]() { return Call("GET", "/status")["clients_total"] == "1"; }, 10000));
 
-    Call("POST", "/command", "test_id=1&command=run&job=custom");
+    Call("POST", "/command", "test_id=1&command=run&job=custom&params=mailsize%3D20-50%26mailattach%3D2");
     CHECK(WaitFor([&]() { return Client(1)["state"] == "running" && hooks.steps >= 3; }, 10000));
     CHECK("step" == Client(1)["message"].substr(0, 4));
 
@@ -611,9 +658,63 @@ static void TestHerdClientHooks()
     CHECK(HERD_END_CLEAN == end);
     CHECK("load1" == hooks.registeredAs);
     CHECK("custom" == hooks.startedJob);
+    CHECK("mailsize=20-50&mailattach=2" == hooks.startedParams);   // the job parameters arrive unchanged
+    CHECK("switch&other=1" == hooks.workerOptions);                // so do the worker options, before the first command
 }
 
-// a failing job ends the client in error; so does a failing identity setup
+
+// A coordinator with a token: a client with the token works, one without it is refused and ends
+static void TestClientToken()
+{
+    TestServer srv(g_url.port);
+    srv.token = "herd-test-token-0123456789";
+
+    if (!srv.Start(2))
+        exit(0);
+
+    CustomHooks      good;
+    CustomHooks      bad;
+    HerdClientConfig cfgGood = CustomConfig("token-good");
+    HerdClientConfig cfgBad  = CustomConfig("token-bad");
+    HerdEnd          endGood = HERD_END_FAILED;
+    HerdEnd          endBad  = HERD_END_CLEAN;
+
+    cfgGood.token = srv.token;
+
+    std::thread tBad([&]() { HerdClient client(cfgBad, bad); endBad = client.Run(); });
+    tBad.join();
+    CHECK(HERD_END_FAILED == endBad);
+    CHECK(bad.registeredAs.empty());
+
+    std::thread tGood([&]() { HerdClient client(cfgGood, good); endGood = client.Run(); });
+
+    auto status = [&]()
+    {
+        HttpReply   reply;
+        std::string err;
+        Form        f;
+
+        if (HttpCall(g_url, "GET", "/status", "", reply, err, 5, srv.token))
+            ParseTextFields(reply.body, f);
+
+        return f;
+    };
+
+    CHECK(WaitFor([&]() { return status()["clients_idle"] == "1"; }, 10000));
+
+    Form anonymous = Call("GET", "/status");   // without the token: only the error
+    CHECK(anonymous.find("clients_total") == anonymous.end() && "unauthorized" == anonymous["error"]);
+
+    HttpReply   reply;
+    std::string err;
+    HttpCall(g_url, "POST", "/command", "test_id=1&command=stop", reply, err, 5, srv.token);
+    tGood.join();
+    CHECK(HERD_END_CLEAN == endGood);
+    CHECK("load1" == good.registeredAs);
+}
+
+// A failing job is reported and the client waits for the next command; a newer command stops a running job.
+// Only a failing identity setup ends the client in error.
 static void TestHerdClientFailures()
 {
     {
@@ -624,15 +725,38 @@ static void TestHerdClientFailures()
 
         CustomHooks      hooks;
         HerdClientConfig cfg = CustomConfig("hooks-test-2");
-        HerdEnd          end = HERD_END_CLEAN;
+        HerdEnd          end = HERD_END_FAILED;
         hooks.failAfter      = 2;
         std::thread rt([&]() { HerdClient client(cfg, hooks); end = client.Run(); });
 
         CHECK(WaitFor([]() { return Call("GET", "/status")["clients_total"] == "1"; }, 10000));
+        CHECK(WaitFor([]() { return Client(1)["message"] == "waiting for work"; }, 10000));
+
+        // command 1 fails at step 2: reported once as failed, the client is idle and stays
         Call("POST", "/command", "test_id=1&command=run&job=custom");
-        CHECK(WaitFor([]() { return Client(1)["state"] == "error"; }, 10000));
+        CHECK(WaitFor([]() { Form c = Client(1); return c["state"] == "idle" && c["last_job_result"] == "failed"; }, 10000));
+        CHECK("1" == Client(1)["last_job_id"] && "step 2" == Client(1)["last_job_message"]);
+        CHECK(0 == hooks.aborts);   // a job that ended by itself is not aborted
+
+        // command 2 runs again, command 3 (idle) stops it: JobAbort, reported as stopped
+        hooks.failAfter = 0;
+        Call("POST", "/command", "test_id=1&command=run&job=custom");
+        CHECK(WaitFor([]() { return Client(1)["state"] == "running"; }, 10000));
+        Call("POST", "/command", "test_id=1&command=idle");
+        CHECK(WaitFor([]() { Form c = Client(1); return c["state"] == "idle" && c["ack_command_id"] == "3"; }, 10000));
+
+        Form c = Client(1);
+        CHECK("2" == c["last_job_id"] && "stopped" == c["last_job_result"] && "job custom stopped" == c["last_job_message"]);
+        CHECK(1 == hooks.aborts);
+
+        Form s = Call("GET", "/status");
+        CHECK("1" == s["jobs_failed"] && "1" == s["jobs_stopped"] && "0" == s["clients_error"]);
+
+        Call("POST", "/command", "test_id=1&command=stop");
+        CHECK(WaitFor([]() { return Client(1)["state"] == "done"; }, 10000));
         rt.join();
-        CHECK(HERD_END_FAILED == end);
+        CHECK(HERD_END_CLEAN == end);
+        CHECK(hooks.stateChanges > 0 && "done" == hooks.lastState);
     }
 
     {
@@ -653,6 +777,32 @@ static void TestHerdClientFailures()
         CHECK(HERD_END_FAILED == end);
         CHECK(0 == hooks.steps);
     }
+}
+
+// A message over the coordinator's limit (MAX_STATUS_MESSAGE_BYTES) is cut (not inside a UTF-8 character): the reports are accepted
+// and the client still follows commands
+static void TestLongMessage()
+{
+    TestServer srv(g_url.port);
+
+    if (!srv.Start(1))
+        exit(0);
+
+    CustomHooks      hooks;
+    HerdClientConfig cfg = CustomConfig("long-message");
+    HerdEnd          end = HERD_END_FAILED;
+    hooks.longMessage    = true;
+    std::thread rt([&]() { HerdClient client(cfg, hooks); end = client.Run(); });
+
+    CHECK(WaitFor([]() { return Call("GET", "/status")["clients_total"] == "1"; }, 10000));
+    Call("POST", "/command", "test_id=1&command=run&job=custom");
+    CHECK(WaitFor([&]() { return Client(1)["state"] == "running" && hooks.steps >= 2; }, 10000));
+    CHECK(std::string(MAX_STATUS_MESSAGE_BYTES - 1, 'x') == Client(1)["message"]);
+
+    Call("POST", "/command", "test_id=1&command=stop");
+    CHECK(WaitFor([]() { return Client(1)["state"] == "done"; }, 10000));
+    rt.join();
+    CHECK(HERD_END_CLEAN == end);
 }
 
 // A client that finds no free account keeps waiting (the default), and says so; told not to, it ends
@@ -752,19 +902,23 @@ int main()
             "no runner output (truncated, chunked and malformed replies are rejected)");
     RunTest("shared client core with custom job hooks (what domlem uses)", TestHerdClientHooks,
             "no runner output (a counted job step runs, stands still while paused, then stop)");
+    RunTest("coordinator token", TestClientToken,
+            "no runner output (a client without the token is refused and ends, one with it works)");
+    RunTest("message over the coordinator's limit", TestLongMessage,
+            "no runner output (the message is cut before the character that crosses the limit, the client still stops on command)");
     RunTest("waiting for an account", TestWaitForAccount,
             "no runner output (one waits and reports it, one ends with the pool exhausted)");
-    RunTest("custom hooks: failing job and failing identity setup", TestHerdClientFailures,
-            "no runner output (both end the client in error)");
-    RunTest("program argument placeholders {NSH_...}", TestArgTemplates,
-            "no runner output (expansion, literal text, unknown names and {NSH_PASSWORD} refused)");
+    RunTest("custom hooks: failing job, stopped job, failing identity setup", TestHerdClientFailures,
+            "no runner output (failed and stopped jobs are reported, the client stays; only the identity setup ends it in error)");
+    RunTest("program argument placeholders {NSHTEST_...}", TestArgTemplates,
+            "no runner output (expansion, old names, literal text, unknown names and {NSHTEST_PASSWORD} refused)");
 #ifndef _WIN32
     RunTest("child that ignores SIGTERM", TestStubbornChild,
             "no runner output (the child is killed and reaped)");
     RunTest("external program: success, then failing job", TestExternalProgram,
-            "first job finishes (exit 0); second job exits 1, so '1 failed' below is the INTENDED result");
+            "first job ok (exit 0), second job failed (exit 1), the client stays until stop; 0 failed");
     RunTest("external program that cannot be started", TestMissingProgram,
-            "client ends in error and '1 failed' below is the INTENDED result");
+            "the job is reported as failed, the client stays until stop; 0 failed");
     RunTest("placeholders reach the child as arguments", TestTemplatedChild,
             "job finishes (exit 0): the child got load1, tpljob and 1 as arguments; 0 failed");
 #endif

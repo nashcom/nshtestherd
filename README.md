@@ -10,10 +10,11 @@ libraries, all state in memory.
 
 A **herd** is one test run as the coordinator sees it: the account pool plus all clients registered against it.
 
-> **Security:** there is no authentication and no TLS, and `/register` hands out account passwords. Run it on a trusted test
-> network only, see [Security](#security).
+> **Security:** no TLS, and `/register` hands out account passwords. An optional shared token (`NSHTEST_TOKEN`) keeps
+> strangers from steering the herd; without it anyone who reaches the port can. Run it on a trusted test network, see
+> [Security](#security).
 
-**Status:** version 0.9.0. Tested on Linux; the Windows build is written but not yet built or tested
+**Status:** version 0.9.1. Tested on Linux; the Windows build is written but not yet built or tested
 (see [Status and limits](#status-and-limits)).
 
 One executable, two modes:
@@ -94,7 +95,9 @@ internetaddress=load000001@example.com
 command=idle
 command_id=0
 job=
+params=
 pause_seconds=0
+worker_options=
 ```
 
 **4. Tell all clients to run a job**, then look at the client:
@@ -114,6 +117,7 @@ message=
 command=run
 command_id=1
 job=demo
+params=
 pause_seconds=0
 ```
 
@@ -163,21 +167,41 @@ Set `H` once (use the coordinator's host name when you are not on the same machi
 H=http://127.0.0.1:8788
 ```
 
-| Goal               | Command                                                                     |
-| ------------------ | --------------------------------------------------------------------------- |
-| Is it up?          | `curl $H/health`                                                            |
-| Herd summary       | `curl $H/status`                                                            |
-| One client         | `curl "$H/client?test_id=1"`                                                |
-| Run a job on all   | `curl -X POST -d 'target=all&command=run&job=NAME' $H/command`              |
-| Pause all for 60 s | `curl -X POST -d 'target=all&command=pause&pause_seconds=60' $H/command`    |
-| Stop all           | `curl -X POST -d 'target=all&command=stop' $H/command`                      |
-| Stop one client    | `curl -X POST -d 'test_id=3&command=stop' $H/command`                       |
-| Load another pool  | `curl -X POST -H 'Content-Type: text/csv' --data-binary @users.csv $H/load` |
-| Metrics            | `curl $H/metrics`                                                           |
-| Start over         | Restart the coordinator (stop the workers first)                            |
+| Goal                         | Command                                                                     |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| Is it up?                    | `curl $H/health`                                                            |
+| Herd summary                 | `curl $H/status`                                                            |
+| Job results so far           | `curl -s $H/status \| grep '^jobs_'`                                        |
+| One client (and its last job)| `curl "$H/client?test_id=1"`                                                |
+| Run a job on all             | `curl -X POST -d 'target=all&command=run&job=NAME' $H/command`              |
+| Run a job on one client      | `curl -X POST -d 'test_id=3&command=run&job=NAME' $H/command`               |
+| Run a job with parameters    | `curl -X POST -d 'target=all&command=run&job=NAME' --data-urlencode 'params=a=1&b=2' $H/command` |
+| End the jobs, keep workers   | `curl -X POST -d 'target=all&command=idle' $H/command`                      |
+| Pause all for 60 s           | `curl -X POST -d 'target=all&command=pause&pause_seconds=60' $H/command`    |
+| Stop all (workers end)       | `curl -X POST -d 'target=all&command=stop' $H/command`                      |
+| Stop one client              | `curl -X POST -d 'test_id=3&command=stop' $H/command`                       |
+| Load another pool            | `curl -X POST -H 'Content-Type: text/csv' --data-binary @users.csv $H/load` |
+| Metrics                      | `curl $H/metrics`                                                           |
+| Start over                   | Restart the coordinator (stop the workers first)                            |
 
 `/load` only works before the first client has registered. Add `-i` to any curl call to see the HTTP status, and
 `-H 'Accept: application/json'` to get JSON instead of `key=value` lines.
+
+**With a token** (the coordinator runs with `NSHTEST_TOKEN`), every call but `/health` needs the header. Put it in a
+variable once and add it to each call:
+
+```bash
+A="Authorization: Bearer $NSHTEST_TOKEN"
+curl -H "$A" $H/status
+curl -H "$A" -X POST -d 'target=all&command=run&job=NAME' $H/command
+```
+
+A job that ends - finished, failed, or replaced by `idle`, another `run` or `stop` - never ends the worker: it reports the
+result (`last_job_result` in `/client`, the `jobs_ok`, `jobs_failed`, `jobs_stopped` totals in `/status`) and is `idle`
+again, waiting for the next command. Only `stop` ends a worker.
+
+curl is the operator's tool and runs wherever you are: any machine that reaches the coordinator's port. The workers do
+not need it; they talk to the coordinator themselves (polling), and the coordinator never connects to them.
 
 ## Concepts
 
@@ -217,7 +241,7 @@ The release workflow publishes a multi-arch image (linux/amd64 and linux/arm64) 
 
 ```bash
 docker pull ghcr.io/nashcom/nshtestherd:latest     # newest release
-docker pull ghcr.io/nashcom/nshtestherd:0.9.0      # a specific release
+docker pull ghcr.io/nashcom/nshtestherd:0.9.1      # a specific release
 ```
 
 | Item        | Value                                                                                           |
@@ -347,15 +371,16 @@ able to read `users.csv`):
 ```
 
 **Smoke test without a load program.** Enable the commented `--program /nshtestherd -- --child-info` lines in the `runner`
-command. After a `run` command each client's child prints `child pid=... NSH_SHORTNAME=...` in `docker compose logs runner`.
+command. After a `run` command each client's child prints `child pid=... NSHTEST_SHORTNAME=...` in `docker compose logs runner`.
 A real load program needs a derived image (see above); put its image name in `NSHTESTHERD_IMAGE` or in a `build:` of your own.
 
-**Runners on other machines.** Publish the herd on the network with `HERD_BIND=0.0.0.0` (trusted network only: there is no
-authentication and `/register` returns passwords), then start a runner on the other machine:
+**Runners on other machines.** Publish the herd on the network with `HERD_BIND=0.0.0.0` and set a token (trusted network
+only: there is no TLS and `/register` returns passwords), then start a runner on the other machine with the same token:
 
 ```bash
+export NSHTEST_TOKEN=$(openssl rand -hex 24)
 HERD_BIND=0.0.0.0 docker compose up -d herd
-docker run --rm ghcr.io/nashcom/nshtestherd --runner --server http://<herd-host>:8788 --clients 20
+docker run --rm -e NSHTEST_TOKEN ghcr.io/nashcom/nshtestherd --runner --server http://<herd-host>:8788 --clients 20
 ```
 
 **Stopping and restarting.** `docker compose --profile test down` removes the containers, including the runner (without
@@ -390,10 +415,11 @@ docker run --rm --network herdnet my-runner --runner --server http://herd:8788 -
   --program /usr/local/bin/mytests -- --config /etc/mytests.ini
 ```
 
-The runner passes the account to each `mytests` process in `NSH_*` environment variables (see [Runner](#runner-optional)).
+The runner passes the account to each `mytests` process in `NSHTEST_*` environment variables (see [Runner](#runner-optional)).
 
-**Security.** There is no authentication or TLS, and `/register` returns the account passwords. Publish the port only
-on a trusted test network (for example `-p 127.0.0.1:8788:8788` when only local tools need it).
+**Security.** There is no TLS, and `/register` returns the account passwords. Publish the port only on a trusted test
+network (for example `-p 127.0.0.1:8788:8788` when only local tools need it), and set `NSHTEST_TOKEN` (`-e NSHTEST_TOKEN`)
+as soon as other machines can reach it.
 
 **Building the image yourself:**
 
@@ -436,18 +462,20 @@ g++ -std=c++17 -O2 -o nshtestherd.exe src/main.cpp src/http.cpp src/runner.cpp s
 ## Server mode
 
 `nshtestherd [options]` is the default mode. It runs in the foreground; Ctrl+C / SIGTERM shuts down gracefully.
-Starting without accounts is valid: registration returns 409 `no_accounts_loaded` until accounts arrive
-(`--csv`, `--generate`, or `POST /load`).
+Without `--csv` or `--generate` it generates **100 accounts** (`load000001` ... with the password `TestPassword`), so a
+coordinator works without any option; `POST /load` can still replace them until the first registration. To start with
+an empty pool use `--generate 0`: registration then returns 409 `no_accounts_loaded` until `POST /load` brings accounts.
 
 | Option                | Default        | Meaning                                                               |
 | --------------------- | -------------- | --------------------------------------------------------------------- |
 | `--bind <ipv4>`       | `127.0.0.1`    | Listen address (IPv4). `0.0.0.0` for remote workers                   |
 | `--port <n>`          | `8788`         | Listen port                                                           |
 | `--csv <file>`        | none           | Load accounts at startup                                              |
-| `--generate <n>`      | none           | No CSV: generate `n` accounts (1-1000000); not with `--csv`           |
-| `--prefix <name>`     | `load`         | Generated name prefix (`load000001`); needs `--generate`              |
-| `--password <pw>`     | `TestPassword` | Generated password; needs `--generate`                                |
-| `--domain <name>`     | `example.com`  | Generated mail domain; needs `--generate`                             |
+| `--generate <n>`      | `100`          | No CSV: generate `n` accounts (0-1000000; 0: empty pool); not with `--csv` |
+| `--prefix <name>`     | `load`         | Generated name prefix (`load000001`); not with `--csv`                |
+| `--password <pw>`     | `TestPassword` | Generated password; not with `--csv`                                  |
+| `--domain <name>`     | `example.com`  | Generated mail domain; not with `--csv`                               |
+| `--worker-options <s>`| none           | Options for the workers, returned with every registration (`name=value&name`); each worker takes what it knows (domlem: `switch`) |
 | `--threads <n>`       | `8`            | Worker threads; 64 more connections may wait, then 503                |
 | `--max-csv-bytes <n>` | `16777216`     | Size limit for `POST /load` (other bodies 64 KB, headers 16 KB)       |
 | `--timeout <s>`       | `10`           | Socket timeout and deadline for reading one request                   |
@@ -500,7 +528,8 @@ nshtestherd_clients_by_state{state="running"}          # clients running right n
 sum(nshtestherd_clients_by_state)                      # all registered clients
 nshtestherd_users_available                            # accounts still free
 rate(nshtestherd_status_reports_total[1m])             # status reports per second (polling load)
-nshtestherd_clients_by_state{state="error"} > 0        # alert: any client in error
+nshtestherd_clients_by_state{state="error"} > 0        # alert: a client that cannot work (identity setup failed)
+rate(nshtestherd_jobs_ended_total{result="failed"}[5m]) # failed jobs per second
 ```
 
 ### Sizing and operation
@@ -527,7 +556,7 @@ nshtestherd --runner --server http://coordinator:8788                     # up t
 nshtestherd --runner --server http://coordinator:8788 --clients 100       # exactly 100 (per machine), built-in dummy job
 nshtestherd --runner --server http://coordinator:8788 --clients all       # one client per free account (max 1000), single runner
 nshtestherd --runner --server http://coordinator:8788 --clients 100 \
-  --program mytests -- --user {NSH_SHORTNAME} --id {NSH_TEST_ID}            # external program, per-client arguments
+  --program mytests -- --user {NSHTEST_SHORTNAME} --id {NSHTEST_TEST_ID}            # external program, per-client arguments
 ```
 
 | Option               | Default                 | Meaning                                                         |
@@ -542,8 +571,8 @@ nshtestherd --runner --server http://coordinator:8788 --clients 100 \
 | `--verbose`          | off                     | Accepted for symmetry; the runner always logs key events        |
 
 Server options (`--bind --port --csv --generate --prefix --password --domain --threads --max-csv-bytes --timeout`)
-and runner options cannot be mixed. Exit codes: 0 no client failed, 1 at least one client failed (error, refused
-registration, coordinator lost), 2 usage error.
+and runner options cannot be mixed. Exit codes: 0 no client failed, 1 at least one client failed (refused
+registration, coordinator lost), 2 usage error. A failed job is not a failed client.
 
 How many clients:
 
@@ -564,37 +593,47 @@ Behaviour:
   use a real executable, not a `.bat`/`.cmd`). Arguments after `--` go to every child, with placeholders replaced
   per client (see below). The account and job **always** come in via environment variables:
 
-  | Variable                                                                | Value                                        |
-  | ----------------------------------------------------------------------- | -------------------------------------------- |
-  | `NSH_TEST_ID`                                                           | sequential test client number                |
-  | `NSH_FIRSTNAME`, `NSH_LASTNAME`, `NSH_SHORTNAME`, `NSH_INTERNETADDRESS` | allocated account                            |
-  | `NSH_PASSWORD`                                                          | allocated password (environment, never argv) |
-  | `NSH_JOB`                                                               | job name from the `run` command              |
-  | `NSH_COMMAND_ID`                                                        | command id that started this child           |
-  | `NSH_SERVER`                                                            | coordinator URL                              |
+  | Variable                                                         | Value                                          |
+  | ---------------------------------------------------------------- | ---------------------------------------------- |
+  | `NSHTEST_TEST_ID`                                                | sequential test client number                  |
+  | `NSHTEST_FIRSTNAME`, `NSHTEST_LASTNAME`                          | allocated account: names                       |
+  | `NSHTEST_SHORTNAME`, `NSHTEST_INTERNETADDRESS`                   | allocated account: short name and mail address |
+  | `NSHTEST_PASSWORD`                                               | allocated password (environment, never argv)   |
+  | `NSHTEST_JOB`                                                    | job name from the `run` command                |
+  | `NSHTEST_PARAMS`                                                 | parameters of the `run` command (may be empty) |
+  | `NSHTEST_COMMAND_ID`                                             | command id that started this child             |
+  | `NSHTEST_SERVER`                                                 | coordinator URL                                |
+  | `NSHTEST_TOKEN`                                                  | inherited from the runner, when it has a token |
+
+  **Renamed:** these variables used to be called `NSH_*` (`NSH_SHORTNAME`, `NSH_PASSWORD`, ...). The runner still sets the
+  old names as well, and `{NSH_...}` placeholders still work, so existing programs keep running. Both are deprecated and
+  go away in a later release: switch to `NSHTEST_*`.
 
 - **Argument placeholders.** To give every child its own command-line arguments, use the variable names in braces in the
   arguments after `--`. The placeholders are exactly the environment variable names above, so there is nothing new to learn:
 
   ```bash
-  nshtestherd --runner --clients 50 --program mytests -- --user {NSH_SHORTNAME} --id {NSH_TEST_ID} --scenario {NSH_JOB}
+  nshtestherd --runner --clients 50 --program mytests -- --user {NSHTEST_SHORTNAME} --id {NSHTEST_TEST_ID} --scenario {NSHTEST_JOB}
   ```
 
   For client 7 the child is started as `mytests --user load000007 --id 7 --scenario <job of the run command>`.
-  - Available: `{NSH_TEST_ID}`, `{NSH_FIRSTNAME}`, `{NSH_LASTNAME}`, `{NSH_SHORTNAME}`, `{NSH_INTERNETADDRESS}`,
-    `{NSH_JOB}`, `{NSH_COMMAND_ID}`, `{NSH_SERVER}`.
+  - Available: `{NSHTEST_TEST_ID}`, `{NSHTEST_FIRSTNAME}`, `{NSHTEST_LASTNAME}`, `{NSHTEST_SHORTNAME}`, `{NSHTEST_INTERNETADDRESS}`,
+    `{NSHTEST_JOB}`, `{NSHTEST_PARAMS}`, `{NSHTEST_COMMAND_ID}`, `{NSHTEST_SERVER}`.
   - There is no shell: a placeholder is replaced inside its own argument, so a value with spaces stays one argument.
-  - Everything that is not a complete `{NSH_NAME}` is literal text, so JSON such as `{"a":1}` needs no escaping.
-  - An unknown name (for example `{NSH_TYPO}`) is refused at startup with exit code 2, not when the first child starts.
-  - **`{NSH_PASSWORD}` is refused:** an argument is visible to every user in the process list (`ps`, `/proc`). A program
-    reads the password from the environment variable `NSH_PASSWORD` instead.
-  - Do not write `$NSH_SHORTNAME` or `${NSH_SHORTNAME}`: your shell, or Docker Compose in a `command:` list, expands that
-    itself before the runner sees it. Use the braces alone (`{NSH_SHORTNAME}`; they are safe in bash and in Compose).
+  - Everything that is not a complete `{NSHTEST_NAME}` is literal text, so JSON such as `{"a":1}` needs no escaping.
+  - An unknown name (for example `{NSHTEST_TYPO}`) is refused at startup with exit code 2, not when the first child starts.
+  - **`{NSHTEST_PASSWORD}` is refused:** an argument is visible to every user in the process list (`ps`, `/proc`). A program
+    reads the password from the environment variable `NSHTEST_PASSWORD` instead.
+  - Do not write `$NSHTEST_SHORTNAME` or `${NSHTEST_SHORTNAME}`: your shell, or Docker Compose in a `command:` list, expands that
+    itself before the runner sees it. Use the braces alone (`{NSHTEST_SHORTNAME}`; they are safe in bash and in Compose).
   - Values are inserted as they are and are never expanded a second time.
 
-- Child exit 0: the client reports `idle` with the message `job X finished (exit 0)`. A finished
+- Child exit 0: the job is reported as `ok` with the message `job X finished (exit 0)`. A finished
   child is **not** restarted for an already acknowledged command id; a new `run` starts a new one.
-  Non-zero exit or launch failure: the client reports `error` (final) and the runner exits 1.
+  Non-zero exit or launch failure: the job is reported as `failed` with the message `job X failed (exit N)`.
+  Either way the client goes back to `idle` and waits for the next command; a job never ends the client.
+  The coordinator keeps the result per client (`GET /client`: `last_job_id`, `last_job`, `last_job_result`,
+  `last_job_message`) and counts it (`GET /status`: `jobs_ok`, `jobs_failed`, `jobs_stopped`).
 - Pause, job changes and graceful stop are applied **between** child executions: while a child
   runs, new instructions wait and are acknowledged once applied. Nothing here pauses or stops an
   arbitrary program mid-run. Ctrl+C on the runner stops the children and reports
@@ -604,10 +643,10 @@ Behaviour:
 - **The runner owns status reporting.** For each client the runner is the only one that sends `POST /status`
   (state, acknowledgements, last contact). A child must not report with the same `test_id`: its reports would
   overwrite the runner's state and acknowledgements. A child may read its desired command with
-  `GET /client?test_id=$NSH_TEST_ID` (read-only, no password), but it cannot acknowledge it.
+  `GET /client?test_id=$NSHTEST_TEST_ID` (read-only, no password), but it cannot acknowledge it.
 - **Cooperative stop for long-running programs.** The runner cannot pause or stop a program in the middle of its work; the
   program has to cooperate. It can do that today: it reads the desired command read-only with
-  `GET /client?test_id=$NSH_TEST_ID`, and when it sees `stop` (or `pause`) it finishes its current operation and exits
+  `GET /client?test_id=$NSHTEST_TEST_ID`, and when it sees `stop` (or `pause`) it finishes its current operation and exits
   with 0. The runner then applies the pending command and reports it. The runner stays the only status reporter. A ready-made
   helper library is not provided yet. The pattern, an example script and the exit code rules are in
   [docs/RUNNER-PROGRAMS.md](docs/RUNNER-PROGRAMS.md).
@@ -626,30 +665,40 @@ Behaviour:
 ### Smoke test without any load program
 
 The runner can start `nshtestherd` itself as the child. `--child-info` prints the child's process id and the
-`NSH_*` values it received (never the password) and exits 0:
+`NSHTEST_*` values it received (never the password) and exits 0:
 
 ```bash
 ./nshtestherd --generate 10
 ./nshtestherd --runner --clients 2 --program ./nshtestherd -- --child-info
 curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
-# [client 1 ...] child pid=4711 NSH_TEST_ID=1 NSH_SHORTNAME=load000001 NSH_JOB=demo ... NSH_PASSWORD=(set)
+# [client 1 ...] child pid=4711 NSHTEST_TEST_ID=1 NSHTEST_SHORTNAME=load000001 NSHTEST_JOB=demo ... NSHTEST_PASSWORD=(set)
 ```
 
 ### Domino workers: domlem
 
 [domlem](domlem/) is the Domino add-in version of a runner: a servertask that registers with the coordinator, receives a
-test account and does Notes work (for example opening a database as that user) while following `run`, `pause` and `stop`.
-It uses the same client core as the runner (`src/herdclient.*`), so it behaves the same way. With `-switch` it registers
-the Domino user (with mail file) if it does not exist, downloads its ID from the ID vault and works as that user. One
-process is one client; start it many times for many clients. See [domlem/README.md](domlem/README.md).
+test account and does Notes work while following `run`, `pause`, `idle` and `stop`. Jobs: `dbopen`, `agent` (or
+`agent:<name>` for any agent of the test database), `mail` and `mailtest` (random subjects, attachments, body text and
+recipients from the test pool, with a sent copy). It uses the same client core as the runner (`src/herdclient.*`), so it
+behaves the same way. With `-switch` it registers the Domino user (with mail file) if it does not exist, downloads its ID
+from the ID vault and works as that user. One process is one client; start it many times for many clients.
+
+```bash
+curl -X POST -d 'target=all&command=run&job=mailtest' $H/command
+```
+
+See [domlem/README.md](domlem/README.md), with its own curl cheat sheet.
 
 ## Security
 
 nshtestherd is a test tool for a trusted network. Know what an open port means:
 
-- **No authentication, no TLS.** Anyone who can reach the port can register (and receive an account **with its
-  password**), read the status, issue commands such as `stop` for every client, and load a new account pool before the
-  first registration.
+- **Optional token, no TLS.** Without a token anyone who can reach the port can register (and receive an account **with
+  its password**), read the status, issue commands such as `stop` for every client, and load a new account pool before
+  the first registration. With `NSHTEST_TOKEN` set (16-256 printable characters, from the environment so it is not in
+  the process list) every call but `GET /health` needs `Authorization: Bearer <token>`; the runner, domlem and the
+  examples read the same `NSHTEST_TOKEN` and send it. The token travels in plain text: it keeps strangers out, not
+  someone who can read the traffic. Generate one with `openssl rand -hex 24`.
 - **Safe defaults.** The server listens on `127.0.0.1`; the Compose stack publishes on `127.0.0.1`. Use `--bind 0.0.0.0` /
   `HERD_BIND=0.0.0.0` only on a test network, and limit the port (8788 by default) with a firewall to the test machines.
 - **Across untrusted networks** put it behind an SSH tunnel or a TLS reverse proxy with authentication of your choice.
@@ -663,11 +712,12 @@ nshtestherd is a test tool for a trusted network. Know what an open port means:
 
 | Symptom                               | Cause / fix                                                               |
 | ------------------------------------- | ------------------------------------------------------------------------- |
-| Registration 409 `no_accounts_loaded` | No pool yet: use `--csv` / `--generate` or `POST /load`; runners wait     |
+| Registration 409 `no_accounts_loaded` | Started with `--generate 0`: `POST /load` the accounts; runners wait      |
 | Registration 409 `pool_exhausted`     | All accounts booked: restart the server, or load a larger pool            |
 | `POST /load` 409 `load_not_allowed`   | A client already registered: restart the server to load another pool      |
 | Runner: "no longer knows this client" | The server was restarted: stop old runners before restarting it           |
 | Runner: "coordinator unreachable"     | Wrong `--server`, server down, or `--bind 127.0.0.1` with a remote runner |
+| 401 `unauthorized`                    | The coordinator has a token: send `Authorization: Bearer <token>` (runner: `NSHTEST_TOKEN`) |
 | 503 from the server                   | More than 64 waiting connections: raise `--threads` or poll less often    |
 | 413                                   | Request too large (64 KB; `--max-csv-bytes` for `/load`)                  |
 | Cannot bind: "Address already in use" | Another process uses the port: stop it or set `--port`                    |
@@ -683,7 +733,8 @@ nshtestherd is a test tool for a trusted network. Know what an open port means:
 | Not tested                               | Heavy load (503 on queue overflow, slow clients, 1000 runner clients) |
 
 - All state in memory. No persistence, leases, or automatic account reclamation after a crashed worker.
-- No authentication, no TLS: run it on a trusted test network. `--bind 0.0.0.0` exposes the passwords returned by `/register`.
+- No TLS, and authentication is one optional shared token: run it on a trusted test network. `--bind 0.0.0.0` exposes the
+  passwords returned by `/register` to anyone who reaches the port (and has the token, when one is set).
 - IPv4 only; the runner talks `http://` only.
 - One request per connection (no keep-alive, no chunked request bodies).
 - No Kubernetes integration, no web UI, no user provisioning, no load generation of its own.
@@ -741,21 +792,26 @@ Dockerfile        static Alpine build into a scratch image (docker/, build.sh)
 docker-compose.yml  coordinator + runner stack (see "Docker Compose stack")
 .github/          ci.yml (build + tests), release.yml (static binaries + GHCR image)
 push-release.sh   updates version.txt and pushes the vX.Y.Z tag
+CHANGES.md        what changed in every version (also the text of the GitHub release)
 ```
 
 ## Releasing (maintainers)
 
-The version lives in one place: `NSHTESTHERD_VERSION` in [src/version.h](src/version.h) (currently `0.9.0`). It is what
+The version lives in one place: `NSHTESTHERD_VERSION` in [src/version.h](src/version.h) (currently `0.9.1`). It is what
 `./nshtestherd --version` prints and what the server shows in its startup line. `version.txt` is a convenience copy
 (anyone can read the latest released version without parsing the header); it plays no part in the build.
+
+Every change goes into [CHANGES.md](CHANGES.md) together with the change itself, under the heading of the coming
+version (`## X.Y.Z`, the version in `src/version.h`).
 
 | Step                 | What happens                                                                                |
 | -------------------- | ------------------------------------------------------------------------------------------- |
 | Push or pull request | `ci.yml`: `make`, `make test`, `tests/integration.sh` on Ubuntu                             |
-| `./push-release.sh`  | Updates `version.txt` (commits it if changed), re-tags and pushes `vX.Y.Z`                  |
+| `./push-release.sh`  | Refuses to run without a `## X.Y.Z` section in `CHANGES.md`. Updates `version.txt` (commits it if changed), re-tags and pushes `vX.Y.Z`, and prints the `CHANGES.md` section as the release text |
 | Publish a release    | `release.yml`: static amd64 and arm64 binaries (+ `.sha256`) and a multi-arch image on GHCR |
 
-To release: change `NSHTESTHERD_VERSION`, commit, run `./push-release.sh`, then publish the release for the new tag on GitHub.
+To release: check the `## X.Y.Z` section in `CHANGES.md`, change `NSHTESTHERD_VERSION`, commit, run `./push-release.sh`,
+then publish the release for the new tag on GitHub with the text the script printed.
 
 Only the `nshtestherd` binary is a deliverable. The test programs are built by `make test` and CI only; they are not in the
 release assets or in the image.

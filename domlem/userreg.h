@@ -58,6 +58,8 @@ extern WORD g_wDefaultMonths;                 /* certificate validity when DomRe
  *   pszInternetAddress  mail address of the account
  *   pszRetUserName      receives the hierarchical Notes name, the name SECidfGet() is called with
  *   wMaxUserName        size of pszRetUserName
+ *   pbRetCreated        receives TRUE when the user was registered by this call (its ID may need a moment to reach the
+ *                       ID vault), FALSE when it existed; may be NULL
  *
  * Returns NOERROR when the user exists or was created.
  */
@@ -68,6 +70,7 @@ STATUS RegEnsureUser (const DomRegSetup *pSetup,
                       const char         *pszShortName,
                       const char         *pszInternetAddress,
                       char               *pszRetUserName,
-                      WORD                wMaxUserName);
+                      WORD                wMaxUserName,
+                      BOOL               *pbRetCreated);
 
 #endif /* DOMLEM_USERREG_H */

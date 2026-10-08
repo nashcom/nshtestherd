@@ -25,31 +25,40 @@ LIBOBJ = lib.o agentrun.o textgen.o mailclient.o dominoload.o
 # User registration module (needed for -switch)
 REGOBJ = userreg.o
 
-$(TARGET): $(OBJECT) $(LIBOBJ) $(REGOBJ) $(HERDOBJS)
-	$(CC) $(OBJECT) $(LIBOBJ) $(REGOBJ) $(HERDOBJS) $(BOOTOBJS) -L$(NOTESDIR) -Wl,-rpath-link -no-pie $(NOTESDIR) $(LIBS) -o $(TARGET)
+# What the objects were built with: compiler, target, C library and flags. The stamp file changes only when one of them
+# changes, and every object depends on it (and on this makefile), so objects from another build container are rebuilt
+# instead of failing to link (PIE relocations, glibc symbol versions).
+BUILD_ID := $(shell $(CC) -dumpfullversion -dumpmachine 2>/dev/null) $(shell ldd --version 2>/dev/null | head -n 1) $(CC) $(CCOPTS) $(DEFINES)
+BUILDDEPS = makefile .build-id
 
-herd_%.o: $(HERDDIR)/src/%.cpp $(HERDHDRS)
+$(TARGET): $(OBJECT) $(LIBOBJ) $(REGOBJ) $(HERDOBJS)
+	$(CC) $(OBJECT) $(LIBOBJ) $(REGOBJ) $(HERDOBJS) $(BOOTOBJS) -L$(NOTESDIR) -Wl,-rpath-link,$(NOTESDIR) -no-pie $(LIBS) -o $(TARGET)
+
+.build-id: FORCE
+	@echo '$(BUILD_ID)' | cmp -s - $@ || echo '$(BUILD_ID)' > $@
+
+herd_%.o: $(HERDDIR)/src/%.cpp $(HERDHDRS) $(BUILDDEPS)
 	$(CC) $(CCOPTS) -O2 -Wall -fPIC -I$(HERDDIR)/src $< -o $@
 
-$(OBJECT): $(SOURCE) lib.h userreg.h dominoload.h agentrun.h mailclient.h textgen.h $(HERDHDRS)
+$(OBJECT): $(SOURCE) lib.h userreg.h dominoload.h agentrun.h mailclient.h textgen.h $(HERDHDRS) $(BUILDDEPS)
 	$(CC) $(CCOPTS) $(DEFINES) -I$(INCDIR) -I$(HERDDIR)/src $(SOURCE) -o $(OBJECT)
 
-lib.o: lib.cpp lib.h
+lib.o: lib.cpp lib.h $(BUILDDEPS)
 	$(CC) $(CCOPTS) $(DEFINES) -I$(INCDIR) lib.cpp -o lib.o
 
-userreg.o: userreg.cpp userreg.h lib.h
+userreg.o: userreg.cpp userreg.h lib.h $(BUILDDEPS)
 	$(CC) $(CCOPTS) $(DEFINES) -I$(INCDIR) userreg.cpp -o userreg.o
 
-agentrun.o: agentrun.cpp agentrun.h lib.h
+agentrun.o: agentrun.cpp agentrun.h lib.h $(BUILDDEPS)
 	$(CC) $(CCOPTS) $(DEFINES) -I$(INCDIR) agentrun.cpp -o agentrun.o
 
-textgen.o: textgen.cpp textgen.h
+textgen.o: textgen.cpp textgen.h $(BUILDDEPS)
 	$(CC) $(CCOPTS) $(DEFINES) -I$(INCDIR) textgen.cpp -o textgen.o
 
-mailclient.o: mailclient.cpp mailclient.h textgen.h lib.h
+mailclient.o: mailclient.cpp mailclient.h textgen.h lib.h $(BUILDDEPS)
 	$(CC) $(CCOPTS) $(DEFINES) -I$(INCDIR) mailclient.cpp -o mailclient.o
 
-dominoload.o: dominoload.cpp dominoload.h agentrun.h mailclient.h textgen.h lib.h
+dominoload.o: dominoload.cpp dominoload.h agentrun.h mailclient.h textgen.h lib.h $(BUILDDEPS)
 	$(CC) $(CCOPTS) $(DEFINES) -I$(INCDIR) dominoload.cpp -o dominoload.o
 
 install: $(TARGET)
@@ -57,9 +66,11 @@ install: $(TARGET)
 	chmod 755  /opt/hcl/domino/notes/latest/linux/$(PROGRAM)
 
 clean:
-	rm -f *.o
+	rm -f *.o .build-id
 	rm -f ./$(TARGET)
 
 all:    $(TARGET)
 
-.PHONY: install clean all
+FORCE:
+
+.PHONY: install clean all FORCE

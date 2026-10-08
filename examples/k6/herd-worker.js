@@ -34,7 +34,10 @@ const POLL_SECONDS = Number(__ENV.POLL_SECONDS || 2);
 const RUN_ID       = __ENV.RUN_ID || `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
 // Ask for JSON replies: res.json() then gives the flat fields directly.
-const JSON_HEADERS = { Accept: 'application/json' };
+// The coordinator's token (NSHTEST_TOKEN), sent to the coordinator only - never to another target
+const TOKEN        = __ENV.NSHTEST_TOKEN || '';
+const AUTH_HEADERS = TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {};
+const JSON_HEADERS = Object.assign({ Accept: 'application/json' }, AUTH_HEADERS);
 
 export const options = {
     scenarios: {
@@ -145,7 +148,7 @@ function apply(instruction)
 // The actual test step. Replace this with your own requests; use me.shortname / me.password to log in.
 function doTest()
 {
-    const res = http.get(TARGET, { tags: { name: 'target' } });
+    const res = http.get(TARGET, { headers: TARGET.startsWith(HERD) ? AUTH_HEADERS : {}, tags: { name: 'target' } });
 
     check(res, { 'target answers 200': (r) => r.status === 200 });
 }

@@ -1,7 +1,7 @@
 /* mailclient.h - a mail client for load tests (implemented in mailclient.cpp)
  *
  * MailClient crafts a complete mail note (Form, From, SendTo, Recipients, Subject, PostedDate, rich text Body) and
- * writes it straight into the mail.box of a Domino server. The router picks it up from there, so a message exercises
+ * writes it straight into the mail.box of a Domino server, optionally with a sent copy in the sender's mail file. The router picks it up from there, so a message exercises
  * the whole mail path. The mail.box is opened on the server (a remote open): a server with several mail boxes
  * (mail1.box ... mailN.box) hands out one of them for every open of "mail.box".
  *
@@ -45,13 +45,23 @@ public:
     void SetAttachments (const ValueRange &Count, const ValueRange &Bytes, BOOL bBinary);
     void SetAutoSubmitted (BOOL bAutoSubmitted);   /* add the Auto-submitted item (RFC 3834), default TRUE */
 
-    /* Opens the mail.box of the server (pszServer empty: local). On an error Err has the failing call with its error text. */
+    /* Opens the mail.box of the server (pszServer empty: local) and starts counting messages at 1 again, so the
+     * content of message N is the same in every job. On an error Err has the failing call with its error text. */
     STATUS Open (const char *pszServer, std::string &Err);
 
-    /* Releases the mail.box handle. Safe to call more than once. */
+    /* Also saves a copy of every message in this database, the sender's mail file (like "save sent copy" in a Notes
+     * client). pszPath is server!!file. The copy is written before the message goes into the mail.box. */
+    STATUS OpenSentCopy (const char *pszPath, std::string &Err);
+
+    /* Releases the mail.box and the sent copy database. Safe to call more than once. */
     void Close();
 
     BOOL IsOpen() const { return NULLHANDLE != m_hMailBox; }
+    BOOL HasSentCopy() const { return NULLHANDLE != m_hSentCopyDb; }
+
+    /* Goes into the attachment names, to tell the workers apart: "attachment_<tag>_<message>_<n>.bin". Only letters,
+     * digits, dot, dash and underscore; anything else is left out. */
+    void SetAttachmentTag (const char *pszTag);
 
     /* The recipients of the next message: Notes names or internet addresses, as many as needed. The Recipients item
      * is built from all three lists. They stay until ClearRecipients(), so one set can be sent to repeatedly. */
@@ -76,6 +86,7 @@ private:
     MailClient (const MailClient &);                /* not copyable: owns a Notes handle */
     MailClient &operator= (const MailClient &);
 
+    STATUS BuildMessage (NOTEHANDLE hNote, const char *pszFrom, const char *pszSubject, std::string &Err);
     STATUS AddBody (NOTEHANDLE hNote, std::string &Err);
     STATUS AddAttachment (NOTEHANDLE hNote, DWORD dwIndex, std::string &Err);
 
@@ -84,6 +95,8 @@ private:
     std::vector<std::string> m_BlindCopyTo;
 
     DBHANDLE m_hMailBox;
+    DBHANDLE m_hSentCopyDb;     /* the sender's mail file for the sent copies, NULLHANDLE: none */
+    std::string m_AttachTag;
     ValueRange m_BodyBytes;
     TextGenerator m_BodyText;
     ValueRange m_AttachCount;

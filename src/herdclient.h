@@ -24,6 +24,8 @@ struct HerdAccount
     std::string password;
     std::string shortName;
     std::string internetAddress;
+    std::string workerOptions;   // the coordinator's --worker-options ("name=value&name"; empty: none). Not interpreted
+                                 // here: each program takes what it knows and ignores the rest (domlem: "switch")
 };
 
 // What a job gets when a "run" command is applied
@@ -36,11 +38,13 @@ struct HerdJobContext
     std::string serverUrl;       // coordinator URL
 };
 
+// Every job that ends is reported once as last_job_result (ok, failed or stopped); the client then goes back to
+// "idle" and waits for the next command. "error" is only for a client that cannot work at all (identity setup).
 enum HerdJobResult
 {
     HERD_JOB_RUNNING,            // keep going (the client stays "running")
-    HERD_JOB_FINISHED,           // done, the client goes back to "idle"
-    HERD_JOB_FAILED              // failed: the client reports "error" (final)
+    HERD_JOB_FINISHED,           // done: reported as "ok", the client goes back to "idle"
+    HERD_JOB_FAILED              // failed: reported as "failed" with the message, the client goes back to "idle"
 };
 
 enum HerdRegistration
@@ -54,7 +58,7 @@ enum HerdEnd
 {
     HERD_END_CLEAN,              // stop command applied, or the program was interrupted
     HERD_END_POOL_EXHAUSTED,     // registration found every account booked
-    HERD_END_FAILED              // error state, lost allocation, refused registration, identity setup failed
+    HERD_END_FAILED              // lost allocation (coordinator restarted), refused registration, identity setup failed
 };
 
 // Everything the program provides to a HerdClient
@@ -73,6 +77,10 @@ public:
 
     virtual void Log(const std::string &testId, const std::string &text) = 0;
 
+    // The state or the message that is reported to the coordinator has changed (after registration). For a local
+    // status line that shows the same as the coordinator (domlem: the task's status text in "show tasks").
+    virtual void StateChanged(const std::string & /*state*/, const std::string & /*message*/) {}
+
     // ---- registration ----
 
     // Called when the outcome of the registration is known
@@ -90,7 +98,8 @@ public:
     // ---- job (a "run" command) ----
 
     // A run command was applied. message becomes the reported message. Return false with err when the job cannot
-    // be started: the client then reports "error".
+    // be started (unknown job, invalid parameters, ...): the job is reported as "failed" with err, the client stays
+    // "idle".
     virtual bool JobStart(const HerdJobContext &context, std::string &message, std::string &err) = 0;
 
     // True while the job must not be interrupted (for example a child process is running): newer commands wait
@@ -98,10 +107,12 @@ public:
     virtual bool JobBusy() { return false; }
 
     // Called once per loop iteration while the client is "running": do one short step or check the job.
-    // message is the current message; change it to report something else.
+    // message is the current message; change it to report something else. Release what the job holds before
+    // returning HERD_JOB_FINISHED or HERD_JOB_FAILED: JobAbort() is not called for a job that ended by itself.
     virtual HerdJobResult JobStep(std::string &message) = 0;
 
-    // Stop the job at once (the program is interrupted)
+    // Stop the job at once: a newer idle, run or stop command replaces it (only when JobBusy() is false), or the
+    // program is interrupted. The job is reported as "stopped". A pause keeps the job.
     virtual void JobAbort() {}
 };
 
@@ -114,6 +125,7 @@ struct HerdClientConfig
     int         startDelayMs = 0;                    // wait before the first registration (spreads many clients)
     bool        waitForAccount = true;               // no free account: keep asking (Waiting() tells why); false: end with the pool exhausted
     int         httpTimeoutSeconds = 10;             // connect and reply timeout of one call to the coordinator
+    std::string token;                               // sent as "Authorization: Bearer <token>"; empty: none
 };
 
 class HerdClient
@@ -132,6 +144,7 @@ private:
         long long   id           = 0;
         std::string command      = "idle";
         std::string job;
+        std::string params;
         long long   pauseSeconds = 0;
     };
 
@@ -140,6 +153,9 @@ private:
     bool             ReportFinal(const std::string &state, const std::string &message);
     bool             Apply();      // true when the client is finished (stop)
     void             Interrupted();
+    void             SetState(const std::string &state, const std::string &message);
+    void             EndJob(const std::string &result, const std::string &message);   // reports the result, back to idle
+    void             StopJob(bool reportNow);   // aborts a job that is still there (running or paused): "stopped"
     void             Say(const std::string &text) { hooks_.Log(account_.testId, text); }
 
     HerdClientConfig config_;
@@ -155,4 +171,14 @@ private:
 
     std::string resumeState_ = "idle";
     long long   pauseEndMs_  = 0;  // steady clock, milliseconds
+
+    // The current job (jobActive_: started and not ended yet, also while paused)
+    bool        jobActive_ = false;
+    long long   jobId_     = 0;    // command_id of its run command
+    std::string job_;
+
+    // The last job that ended, sent with every report (lastJobId_ 0: none yet)
+    long long   lastJobId_ = 0;
+    std::string lastJob_;
+    std::string lastJobResult_;
 };

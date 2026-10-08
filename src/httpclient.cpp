@@ -115,7 +115,8 @@ bool ParseHttpUrl(const std::string &url, HttpUrl &out, std::string &err)
     return true;
 }
 
-bool HttpCall(const HttpUrl &url, const std::string &method, const std::string &pathAndQuery, const std::string &formBody, HttpReply &reply, std::string &err, int timeoutSeconds)
+bool HttpCall(const HttpUrl &url, const std::string &method, const std::string &pathAndQuery, const std::string &formBody, HttpReply &reply, std::string &err,
+              int timeoutSeconds, const std::string &bearerToken)
 {
     reply = HttpReply();
 
@@ -127,6 +128,9 @@ bool HttpCall(const HttpUrl &url, const std::string &method, const std::string &
     std::string request = method + " " + pathAndQuery + " HTTP/1.1\r\n";
     request += "Host: " + url.host + ":" + std::to_string(url.port) + "\r\n";
     request += "Connection: close\r\n";
+
+    if (!bearerToken.empty())
+        request += "Authorization: Bearer " + bearerToken + "\r\n";
 
     if ("POST" == method)
     {

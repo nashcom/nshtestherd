@@ -13,6 +13,7 @@
 #   POLL_SECONDS   polling interval        (default 2)
 #   RUN_ID         part of the registration keys; REQUIRED to be unique per k6 instance in distributed runs (default: random)
 #   HERD_NETWORK   network of the stack    (default nshtestherd_default; the repository folder name + _default)
+#   NSHTEST_TOKEN  the coordinator's token, when it runs with one (default: none)
 #
 # Coordinator on another machine? Use plain docker, see README.md in this folder.
 
@@ -31,7 +32,8 @@ services:
       RUN_ID:       "${RUN_ID:-}"
       VUS:          "${VUS:-5}"
       DURATION:     "${DURATION:-5m}"
-      POLL_SECONDS: "${POLL_SECONDS:-2}"
+      POLL_SECONDS:  "${POLL_SECONDS:-2}"
+      NSHTEST_TOKEN: "${NSHTEST_TOKEN:-}"
 
     networks:
       - herd

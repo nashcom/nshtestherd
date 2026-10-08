@@ -35,6 +35,9 @@ public:
     /* Exactly nBytes bytes of text (lines separated by \n, paragraphs by an empty line), the same for the same seed */
     std::string Generate (size_t nBytes, unsigned long ulSeed) const;
 
+    /* A short subject line (one line, no \n), the same for the same seed: 3 to 7 words (lorem) or one sentence (funny) */
+    std::string Subject (unsigned long ulSeed) const;
+
 private:
 
     std::string GenerateLorem (size_t nBytes, unsigned long ulSeed) const;

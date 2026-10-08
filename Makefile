@@ -35,7 +35,15 @@ HDRS       = $(wildcard src/*.h)
 # No Notes headers, no threads: any C++17 program can link them.
 HERDLIB_OBJ = src/httpclient.o src/wire.o src/herdclient.o
 
+# What the objects were built with: compiler, target, C library and flags. The stamp file changes only when one of them
+# changes, and every object depends on it, so objects from another toolchain or container are rebuilt instead of failing
+# to link (PIE relocations, glibc symbol versions).
+BUILD_ID := $(shell $(CXX) -dumpfullversion -dumpmachine 2>/dev/null) $(shell ldd --version 2>/dev/null | head -n 1) $(CXX) $(CXXFLAGS)
+
 .DEFAULT_GOAL := all
+
+.build-id: FORCE
+	@echo '$(BUILD_ID)' | cmp -s - $@ || echo '$(BUILD_ID)' > $@
 
 herdlib: $(HERDLIB_OBJ)
 
@@ -54,10 +62,13 @@ test: test_core$(EXE) test_runner$(EXE) nshtestherd$(EXE)
 	./test_core$(EXE)
 	./test_runner$(EXE)
 
-%.o: %.cpp $(HDRS)
+# Every object depends on all headers (coarse, but never stale), on this Makefile and on the toolchain stamp
+%.o: %.cpp $(HDRS) Makefile .build-id
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:
-	rm -f src/*.o tests/*.o nshtestherd nshtestherd.exe test_core test_core.exe test_runner test_runner.exe
+	rm -f src/*.o tests/*.o .build-id nshtestherd nshtestherd.exe test_core test_core.exe test_runner test_runner.exe
 
-.PHONY: all test clean herdlib
+FORCE:
+
+.PHONY: all test clean herdlib FORCE

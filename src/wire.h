@@ -2,10 +2,15 @@
 
 #pragma once
 
+#include <cstddef>
 #include <map>
 #include <string>
 #include <utility>
 #include <vector>
+
+// Longest status message (bytes) the coordinator accepts. The client core cuts its messages to it: one constant for
+// both sides. Normal messages are much shorter; this leaves room for full error texts.
+const size_t MAX_STATUS_MESSAGE_BYTES = 2048;
 
 // Ordered flat list of scalar fields. Numbers render unquoted in JSON.
 class Fields

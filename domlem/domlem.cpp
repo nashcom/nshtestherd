@@ -18,10 +18,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <time.h>
 
+#include <algorithm>
+#include <fstream>
 #include <random>
 #include <string>
+#include <vector>
 
 #include "herdclient.h"
 
@@ -45,22 +49,33 @@
 
 #define DOMLEM_VERSION "0.1.0"
 
+/* Job "agent:<name>" runs the agent <name> (name or alias) of -db instead of -agent */
+#define JOB_AGENT_PREFIX "agent:"
+
+/* The ID of a user registered just now: download attempts and the pause between them (about one minute in all) */
+#define VAULT_ATTEMPTS   13
+#define VAULT_RETRY_MS   5000
+
 
 /* Globals (set from the command line) */
 
 char g_szLogPrefix[255]        = "domlem";
 char g_szServer[MAXUSERNAME+1] = {0};                        /* -server: Domino server to work against, default: this server */
 char g_szCoordinatorURL[256]   = "http://127.0.0.1:8788";    /* -coordinator: nshtestherd */
-char g_szDbFilePath[MAXPATH+1] = "nshtestherd.nsf";          /* -db: database opened by the dbopen job */
+char g_szDbFilePath[MAXPATH+1] = "nshtestherd.nsf";          /* -db: the test database with the agents of the agent job */
+char g_szOpenDbFilePath[MAXPATH+1] = "names.nsf";            /* -dbopen: database the dbopen job opens (read only: open, access level, close) */
 char g_szAgentName[MAXUSERNAME+1] = "TestAgent";                  /* -agent: agent run by the agent job (in the -db database) */
 DWORD g_dwAgentTimeout        = 600;                         /* -agenttimeout: seconds per agent run (10 minutes), 0: no limit */
 char g_szMailTo[1024]            = {0};                         /* -mailto: recipients of the mail job (comma separated), default: the current user (mail to self) */
 MailSettings g_MailSettings;                                  /* -mailsize, -mailtext, -mailattach, -mailattachsize, -mailattachtype */
 BOOL g_bSwitch                 = FALSE;                      /* -switch: use the account's own identity */
+BOOL g_bSwitchSet              = FALSE;                      /* set on this server (command line or DOMLEM_SWITCH): the coordinator's worker options do not change it */
+BOOL g_bCADerived              = FALSE;                      /* the Domino CA name comes from the server name, not from -ca */
 BOOL g_bWaitForAccount           = TRUE;                       /* nowait turns it off: without a free account the task ends */
 DWORD g_dwPollSeconds          = 2;                          /* -poll */
 
 DomRegSetup g_RegSetup;                                       /* -ca, -certid, -template, -policy, -maildir (and DOMLEM_CERTPW) */
+std::string g_Token;                                          /* NSHTEST_TOKEN or DOMLEM_TOKEN: the coordinator's token (never an option) */
 
 /* Registration defaults, used when g_RegSetup does not say otherwise (declared in userreg.h) */
 WORD g_wMailSystem             = 0;                          /* 0: Notes mail */
@@ -72,6 +87,163 @@ WORD g_wDefaultMonths          = 120;                        /* validity of new 
 
 static void   SaveJobDefaults();
 static STATUS ApplyJobParams (const std::string &Params, std::string &Err);
+
+
+/* What domlem writes, and where. The only write into the Domino Directory is the registration of a test user
+ * (REGNewPerson in userreg.cpp, only with -switch); lookups and the people search for random recipients only read.
+ * Mail goes into mail.box and the sender's own mail file. Any new write path into the directory (for example test
+ * groups) must be an explicit, documented option.
+ *
+ * The agent job is the one path to arbitrary writes: an agent runs unrestricted. So it never runs agents of a system
+ * database, even if -db names one. The list of system databases is Domino's own: dominosystemdbs.ind in the data
+ * directory, one path per line relative to the data directory ("names.nsf", "mtdata/mtstore.nsf", "mail1.box"). Without
+ * that file a built-in list of the main ones is used. Always refused as well: every mail box (mail.box, mailN.box) and
+ * the directory of -mailnab. The path checked is the Domino logical name of the opened database (NSFDbPathGet), the
+ * same form as in the file. A check against mistakes and against a run command that picks a directory agent; it is no
+ * sandbox for an agent of the test database. */
+
+#define SYSTEM_DBS_FILE "dominosystemdbs.ind"
+
+/* A logical database name in one form for comparing: lower case, "/" between directories, no leading "/" or "./".
+ * "Mtdata\MTStore.nsf" and "mtdata/mtstore.nsf" are the same database. */
+
+static std::string NormalizeDbName (const std::string &Name)
+{
+    std::string Norm = Name;
+
+    std::replace (Norm.begin(), Norm.end(), '\\', '/');
+    std::transform (Norm.begin(), Norm.end(), Norm.begin(), [](unsigned char c) { return (char) tolower (c); });
+
+    while (!Norm.empty() && ('/' == Norm[0]))
+        Norm.erase (0, 1);
+
+    while (0 == Norm.compare (0, 2, "./"))
+        Norm.erase (0, 2);
+
+    return Norm;
+}
+
+
+/* pszLogicalName: the Domino logical name of the opened database (DominoLoad::GetDbLogicalPath), relative to the data
+ * directory. An empty name counts as a system database: what cannot be named is not run. */
+
+static BOOL IsSystemDatabase (const char *pszLogicalName)
+{
+    static const char *Fallback[] = { "names.nsf", "admin4.nsf", "adminq.nsf", "log.nsf", "events4.nsf", "catalog.nsf",
+                                      "domcfg.nsf", "statrep.nsf", "ddm.nsf", "certlog.nsf", "certstore.nsf", "busytime.nsf",
+                                      "cldbdir.nsf", "domlog.nsf", "idpcat.nsf", "inetlockout.nsf" };
+
+    BOOL                     bSystem = FALSE;
+    char                     szIndFile[MAXPATH+1] = {0};
+    std::string              Name = NormalizeDbName (pszLogicalName ? pszLogicalName : "");
+    std::string              File;
+    std::string              Line;
+    std::vector<std::string> SystemDbs;
+
+    if (Name.empty())
+    {
+        bSystem = TRUE;
+        goto Done;
+    }
+
+    File = Name.substr ((std::string::npos == Name.find_last_of ('/')) ? 0 : Name.find_last_of ('/') + 1);
+
+    /* Domino's list of its system databases in the data directory; read on every check (a job start), it is small */
+    OSGetDataDirectory (szIndFile);
+    OSPathAddTrailingPathSeparator (szIndFile, MAXPATH);
+
+    if (strlen (szIndFile) + sizeofstring (SYSTEM_DBS_FILE) < sizeof (szIndFile))
+    {
+        std::ifstream In (std::string (szIndFile) + SYSTEM_DBS_FILE);
+
+        while (In && std::getline (In, Line))
+        {
+            Line = NormalizeDbName (Line.substr (0, Line.find_last_not_of (" \t\r") + 1));
+
+            if (!Line.empty())
+                SystemDbs.push_back (Line);
+        }
+    }
+
+    if (SystemDbs.empty())
+        SystemDbs.assign (Fallback, Fallback + sizeof (Fallback) / sizeof (Fallback[0]));
+
+    for (size_t nDb = 0; nDb < SystemDbs.size(); nDb++)
+    {
+        if (Name == SystemDbs[nDb])
+            bSystem = TRUE;
+    }
+
+    /* Every mail box: mail.box, mail1.box ... mailN.box */
+    if ((File.size() >= 8) && (0 == File.compare (0, 4, "mail")) && (0 == File.compare (File.size() - 4, 4, ".box")))
+        bSystem = TRUE;
+
+    /* The directory the random recipients come from */
+    if (Name == NormalizeDbName (g_MailSettings.DirectoryFile))
+        bSystem = TRUE;
+
+Done:
+
+    return bSystem;
+}
+
+
+/* The people random recipients are picked from when no -mailfilter is given: the test pool of this lemming's own
+ * account. The short name without its trailing digits is the pool prefix ("load000003" -> "load"); the filter selects
+ * the person documents whose short name is that prefix followed by digits. So a load test never mails a real user. */
+
+static BOOL BuildPoolFilter (const std::string &ShortName, std::string &Filter, std::string &Err)
+{
+    BOOL        bOK    = FALSE;
+    std::string Prefix = ShortName;
+
+    while (!Prefix.empty() && (Prefix.back() >= '0') && (Prefix.back() <= '9'))
+        Prefix.pop_back();
+
+    /* A prefix, followed by at least one digit, and only characters that are literal in a formula string and in @Matches */
+    if (Prefix.empty() || (Prefix.size() == ShortName.size()) || !IsSafeName (Prefix.c_str(), 64))
+    {
+        Err = "Cannot derive the test user filter from the short name [" + ShortName + "]: give -mailfilter";
+        goto Done;
+    }
+
+    Filter = "Form = \"Person\" & @Matches(ShortName; \"" + Prefix + "{0-9}+{0-9}\")";
+    bOK    = TRUE;
+
+Done:
+
+    return bOK;
+}
+
+
+/* The coordinator's worker options (--worker-options, the same for every worker of the herd). domlem takes "switch"
+ * ("switch", "switch=1", "switch=0") and ignores every other name: the options may be meant for other kinds of workers.
+ * This server has the last word: a switch set here (command line or DOMLEM_SWITCH, also =0) is not changed. */
+
+static void ApplyWorkerOptions (const std::string &Options)
+{
+    std::vector<OptionPair> Pairs = SplitUrlOptions (Options.c_str());
+
+    for (size_t nPair = 0; nPair < Pairs.size(); nPair++)
+    {
+        const OptionPair &Pair    = Pairs[nPair];
+        BOOL              bWanted = FALSE;
+
+        if (0 != StrICmp (Pair.name.c_str(), "switch"))
+            continue;
+
+        bWanted = !Pair.bHasValue || (Pair.value != "0" && 0 != StrICmp (Pair.value.c_str(), "false") && 0 != StrICmp (Pair.value.c_str(), "no"));
+
+        if (!g_bSwitchSet)
+        {
+            g_bSwitch = bWanted;
+            AddInLogMessageText ("%s: Identity switch %s by the coordinator (worker options)", NOERROR, g_szLogPrefix, bWanted ? "on" : "off");
+        }
+        else if (bWanted != g_bSwitch)
+            AddInLogMessageText ("%s: The coordinator asks for switch=%s: ignored, this server decides (command line or DOMLEM_SWITCH: switch=%s)",
+                                 NOERROR, g_szLogPrefix, bWanted ? "1" : "0", g_bSwitch ? "1" : "0");
+    }
+}
 
 
 /* The Notes side of a worker: how to wait, how to log, which identity to use and what a job does */
@@ -115,12 +287,27 @@ public:
         AddInLogMessageText ("%s: [%s] %s", NOERROR, g_szLogPrefix, testId.c_str(), text.c_str());
     }
 
+    /* The status text in "show tasks" shows what the coordinator sees: "Idle: waiting for work", "Running: mail #12 ...",
+     * "Idle: job mail failed: ..." */
+    void StateChanged (const std::string &State, const std::string &Message) override
+    {
+        std::string Text = State;
+
+        if (!Text.empty())
+            Text[0] = (char) toupper ((unsigned char) Text[0]);
+
+        AddInSetStatusText ("%s: %.80s", Text.c_str(), Message.c_str());
+    }
+
     /* ---- identity ---- */
 
     bool Registered (const HerdAccount &Account, std::string &Err) override
     {
         STATUS error = NOERROR;
         char   szUserName[MAXUSERNAME+1] = {0};
+
+        /* The coordinator's worker options may ask for the identity switch, unless this server decided already */
+        ApplyWorkerOptions (Account.workerOptions);
 
         if (!g_bSwitch)
         {
@@ -133,16 +320,10 @@ public:
             }
 
             AddInLogMessageText ("%s: Keeping the current identity [%s]", NOERROR, g_szLogPrefix, szUserName);
-            AddInSetStatusText ("Registered, identity: %s", szUserName);
             goto Done;
         }
 
         error = SwitchToAccount (Account, Err);
-
-        if (error)
-            goto Done;
-
-        AddInSetStatusText ("Registered, user: %s", Account.shortName.c_str());
 
 Done:
 
@@ -153,7 +334,11 @@ Done:
 
     bool JobStart (const HerdJobContext &Context, std::string &Message, std::string &Err) override
     {
-        bool bStarted = false;
+        bool         bStarted  = false;
+        bool         bMailTest = false;   /* "mailtest": the mail job with everything random */
+        std::string  AgentName;           /* "agent:<name>": this agent instead of -agent */
+        std::string  LogicalPath;         /* the Domino logical name of the agent's database */
+        MailSettings Mail;
 
         m_Job = JOB_NONE;
 
@@ -161,11 +346,27 @@ Done:
             m_Job = JOB_DBOPEN;
         else if ("agent" == Context.job)
             m_Job = JOB_AGENT;
+        else if (0 == Context.job.compare (0, sizeofstring (JOB_AGENT_PREFIX), JOB_AGENT_PREFIX))
+        {
+            m_Job     = JOB_AGENT;
+            AgentName = Context.job.substr (sizeofstring (JOB_AGENT_PREFIX));
+
+            if (AgentName.empty() || (AgentName.size() > MAXUSERNAME))
+            {
+                Err = "job " + Context.job + ": no usable agent name after " JOB_AGENT_PREFIX;
+                goto Done;
+            }
+        }
         else if ("mail" == Context.job)
             m_Job = JOB_MAIL;
+        else if ("mailtest" == Context.job)
+        {
+            m_Job     = JOB_MAIL;
+            bMailTest = true;
+        }
         else
         {
-            Err = "unknown job: " + Context.job + " (known jobs: dbopen, agent, mail)";
+            Err = "unknown job: " + Context.job + " (known jobs: dbopen, agent, agent:<name>, mail, mailtest)";
             goto Done;
         }
 
@@ -173,28 +374,69 @@ Done:
         if (ApplyJobParams (Context.params, Err))
             goto Done;
 
-        /* The handles are opened now, with the identity the process has now (after a -switch) */
-        m_Load.SetAgent (g_szAgentName, g_dwAgentTimeout);
-        m_Load.SetMail (g_szMailTo, g_MailSettings);
+        /* What the options leave open, the job decides: "mail" is predictable, "mailtest" is random */
+        Mail = g_MailSettings;
 
-        /* The mail job needs no database of the test: only the database jobs open -db */
-        if (m_Load.Init (g_szServer, (JOB_MAIL == m_Job) ? "" : g_szDbFilePath, Err))
+        if (SUBJECT_DEFAULT == Mail.Subject)
+            Mail.Subject = bMailTest ? SUBJECT_RANDOM : SUBJECT_FIXED;
+
+        if (SENTCOPY_DEFAULT == Mail.SentCopy)
+            Mail.SentCopy = bMailTest ? SENTCOPY_AUTO : SENTCOPY_OFF;
+
+        if (bMailTest && !Mail.bRandomCountSet)
+            Mail.RandomCount = ValueRange (1, 3);
+
+        /* Random recipients only from the test pool, unless -mailfilter says which people */
+        if ((JOB_MAIL == m_Job) && Mail.RandomCount.dwMax && Mail.RandomFilter.empty())
         {
-            m_Job = JOB_NONE;
+            if (!BuildPoolFilter (Context.account.shortName, Mail.RandomFilter, Err))
+                goto Done;
+        }
+
+        /* The agent named in the job, else -agent. Only agents of -db: the database stays what the command line says. */
+        if (AgentName.empty())
+            AgentName = g_szAgentName;
+
+        /* The handles are opened now, with the identity the process has now (after a -switch) */
+        m_Load.SetAgent (AgentName.c_str(), g_dwAgentTimeout);
+        m_Load.SetMail (g_szMailTo, Mail);
+        m_Load.SetWorker (Context.account.testId.c_str(), Context.account.shortName.c_str());
+
+        /* Each job opens only its own database: dbopen -dbopen (read only), agent -db, the mail jobs none */
+        if (m_Load.Init (g_szServer, (JOB_MAIL == m_Job) ? "" : ((JOB_DBOPEN == m_Job) ? g_szOpenDbFilePath : g_szDbFilePath), Err))
             goto Done;
+
+        /* An agent may write anywhere in its database: never in the directory or another system database. Checked with
+         * the Domino logical name of the database that was opened, so no physical path, link or other spelling of a
+         * system database gets through. Opening it did nothing; the handles are closed again in Done. */
+        if (JOB_AGENT == m_Job)
+        {
+            LogicalPath = m_Load.GetDbLogicalPath();
+
+            if (LogicalPath.empty() || IsSystemDatabase (LogicalPath.c_str()))
+            {
+                Err = "The agent job does not run agents of the system database [" + (LogicalPath.empty() ? std::string (g_szDbFilePath) : LogicalPath) + "]: use a test database (-db)";
+                goto Done;
+            }
         }
 
         Message = "job " + Context.job;
-
-        AddInSetStatusText ("Running job %s", Context.job.c_str());
         bStarted = true;
 
 Done:
 
+        /* A job that cannot start is reported as failed; the task stays and waits for the next command */
+        if (!bStarted)
+        {
+            m_Load.Term();
+            m_Job = JOB_NONE;
+        }
+
         return bStarted;
     }
 
-    /* One operation per poll */
+    /* One operation per poll. A failed operation ends the job: it is reported as failed, the task waits for the next
+     * command. The client core does not call JobAbort() for a job that ended by itself, so the handles go here. */
     HerdJobResult JobStep (std::string &Message) override
     {
         STATUS error = NOERROR;
@@ -219,6 +461,12 @@ Done:
                 break;
         }
 
+        if (error)
+        {
+            m_Load.Term();
+            m_Job = JOB_NONE;
+        }
+
         return error ? HERD_JOB_FAILED : HERD_JOB_RUNNING;
     }
 
@@ -239,20 +487,34 @@ private:
         char   szDataDir[MAXPATH+1]         = {0};
         char   szPassword[256]              = {0};
         char   szVaultServer[MAXUSERNAME+1] = {0};
+        char   szMailServer[MAXUSERNAME+1]  = {0};
+        char   szMailFile[MAXPATH+1]        = {0};
         int    nLen                         = 0;
+        int    nAttempt                     = 0;
+        BOOL   bCreated                     = FALSE;
 
         strncpy (szPassword, Account.password.c_str(), sizeofstring (szPassword));
+
+        if (!g_RegSetup.certifier.file.empty() && !g_RegSetup.certifier.password.empty())
+            AddInLogMessageText ("%s: Certifier for new users: the ID file [%s]", NOERROR, g_szLogPrefix, g_RegSetup.certifier.file.c_str());
+        else if (!g_RegSetup.certifier.caName.empty())
+            AddInLogMessageText ("%s: Certifier for new users: the Domino CA [%s]%s", NOERROR, g_szLogPrefix, g_RegSetup.certifier.caName.c_str(),
+                                 g_bCADerived ? " of the server's organization (-ca or -certid to choose another)" : "");
 
         error = RegEnsureUser (&g_RegSetup,
                                Account.firstName.c_str(), Account.lastName.c_str(), Account.password.c_str(),
                                Account.shortName.c_str(), Account.internetAddress.c_str(),
-                               szUserName, (WORD) MAXUSERNAME);
+                               szUserName, (WORD) MAXUSERNAME, &bCreated);
 
         if (error)
         {
             Err = "Cannot find or register user for account [" + Account.shortName + "]: " + ErrorText (error);
             goto Done;
         }
+
+        /* An existing user is taken as it is: say so when it has no mail file, the mail jobs depend on it */
+        if (!bCreated && !LookupMailFile (g_szServer, szUserName, szMailServer, (WORD) sizeof (szMailServer), szMailFile, (WORD) sizeof (szMailFile)))
+            AddInLogMessageText ("%s: Warning: [%s] has no mail file in the directory: mail to it is not delivered, no sent copies", NOERROR, g_szLogPrefix, szUserName);
 
         /* The test id becomes part of a file name: only plain names */
         if (!IsSafeName (Account.testId.c_str(), 32))
@@ -275,11 +537,28 @@ private:
             goto Done;
         }
 
-        /* The server buffer is in/out: it comes back with the server that holds the vault. A copy, so that the server
-         * the work is done on stays the one that was configured. */
-        CopyStr (szVaultServer, sizeof (szVaultServer), g_szServer);
+        /* A user registered just now: its ID may need a moment to reach the vault. Retried for a while, only then. */
+        for (nAttempt = 1; ; nAttempt++)
+        {
+            /* The server buffer is in/out: it comes back with the server that holds the vault. A copy for every attempt,
+             * so that the server the work is done on stays the one that was configured. */
+            CopyStr (szVaultServer, sizeof (szVaultServer), g_szServer);
 
-        error = SECidfGet (szUserName, szPassword, m_szIDFile, NULL, szVaultServer, 0, 0, NULL);
+            error = SECidfGet (szUserName, szPassword, m_szIDFile, NULL, szVaultServer, 0, 0, NULL);
+
+            if (!error || !bCreated || (nAttempt >= VAULT_ATTEMPTS))
+                break;
+
+            if (1 == nAttempt)
+                AddInLogMessageText ("%s: The ID of the new user [%s] is not in the vault yet: retrying for up to %d seconds", NOERROR, g_szLogPrefix, szUserName, (VAULT_ATTEMPTS - 1) * VAULT_RETRY_MS / 1000);
+
+            /* TRUE: the server wants the task to end */
+            if (AddInIdleDelay (VAULT_RETRY_MS))
+            {
+                m_bStop = TRUE;
+                break;
+            }
+        }
 
         if (error)
         {
@@ -340,18 +619,21 @@ std::string BuildRequestKey()
 
 void Usage()
 {
-    AddInLogMessageText ("%s: Usage: load domlem [-coordinator <url>] [-server <domino server>] [-switch] [-db <path>] [-agent <name>] [-agenttimeout <seconds>] [-mailto <names>] [-mailsize <KB>] [-mailrandom <count>] [-mailfilter <formula>] [-mailnab <file>] [-mailtext <lorem|funny>] [-mailattach <count>] [-mailattachsize <KB>] [-mailattachtype <binary|text>] [-poll <seconds>]", NOERROR, g_szLogPrefix);
+    AddInLogMessageText ("%s: Usage: load domlem [-coordinator <url>] [-server <domino server>] [-switch] [-dbopen <path>] [-db <path>] [-agent <name>] [-agenttimeout <seconds>] [-mailto <names>] [-mailsize <KB>] [-mailrandom <count>] [-mailfilter <formula>] [-mailsubject <random|fixed>] [-mailsentcopy <yes|no|auto>] [-mailnab <file>] [-mailtext <lorem|funny>] [-mailattach <count>] [-mailattachsize <KB>] [-mailattachtype <binary|text>] [-poll <seconds>]", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s: Options can be given as -name value, or URL style without blanks: name=value&name&name=value (%%20 is a blank, %%26 is &, %%3D is =)", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s:   Example: load domlem coordinator=http://host:8788&switch&mailsize=20-50", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s:   -coordinator  nshtestherd URL (default %s)", NOERROR, g_szLogPrefix, g_szCoordinatorURL);
     AddInLogMessageText ("%s:   -server       Domino server to work against (default: this server)", NOERROR, g_szLogPrefix);
-    AddInLogMessageText ("%s:   -switch       use the identity of the allocated account: register user if needed, ID from vault, switch", NOERROR, g_szLogPrefix);
-    AddInLogMessageText ("%s:   -db           database for the dbopen job (default %s)", NOERROR, g_szLogPrefix, g_szDbFilePath);
+    AddInLogMessageText ("%s:   -switch       use the identity of the allocated account: register user if needed, ID from vault, switch (default: DOMLEM_SWITCH, else off; switch=0 turns it off)", NOERROR, g_szLogPrefix);
+    AddInLogMessageText ("%s:   -dbopen       database the dbopen job opens, read only (default %s)", NOERROR, g_szLogPrefix, g_szOpenDbFilePath);
+    AddInLogMessageText ("%s:   -db           test database with the agents of the agent job, never a system database (default %s)", NOERROR, g_szLogPrefix, g_szDbFilePath);
     AddInLogMessageText ("%s:   -agent        agent run by the agent job, in the -db database (default %s)", NOERROR, g_szLogPrefix, g_szAgentName);
     AddInLogMessageText ("%s:   -agenttimeout execution limit of one agent run in seconds (default %lu, 0: no limit)", NOERROR, g_szLogPrefix, (unsigned long) g_dwAgentTimeout);
     AddInLogMessageText ("%s:   -mailto       recipients of the mail job, comma separated (default: the current user)", NOERROR, g_szLogPrefix);
-    AddInLogMessageText ("%s:   -mailrandom   number of random recipients per mail, picked from the directory (default 0)", NOERROR, g_szLogPrefix);
-    AddInLogMessageText ("%s:   -mailfilter   selection formula of the people to pick from (required with -mailrandom)", NOERROR, g_szLogPrefix);
+    AddInLogMessageText ("%s:   -mailrandom   random recipients per mail from the directory, a number or a range (default: mail 0, mailtest 1-3)", NOERROR, g_szLogPrefix);
+    AddInLogMessageText ("%s:   -mailfilter   selection formula of the people to pick from (default: the test pool of the account)", NOERROR, g_szLogPrefix);
+    AddInLogMessageText ("%s:   -mailsubject  random or fixed (default: mail fixed, mailtest random); always tagged [domlem t<id> <user> #<n>]", NOERROR, g_szLogPrefix);
+    AddInLogMessageText ("%s:   -mailsentcopy yes, no or auto: copy in the sender's mail file (default: mail no, mailtest auto)", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s:   -mailnab      the directory to search (default %s)", NOERROR, g_szLogPrefix, g_MailSettings.DirectoryFile.c_str());
     AddInLogMessageText ("%s:   -mailtext     kind of the mail body text: lorem (default) or funny", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s:   -mailsize     size of the mail body in KB, a number or a range like 1-20 (default %s)", NOERROR, g_szLogPrefix, RangeText (g_MailSettings.BodyKB).c_str());
@@ -360,6 +642,7 @@ void Usage()
     AddInLogMessageText ("%s:   -mailattachtype  content of the attachments: binary (random bytes, default) or text", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s:   -nowait       do not wait for a free account: end when none is left (default: wait)", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s:   -poll         polling interval in seconds (default %lu)", NOERROR, g_szLogPrefix, (unsigned long) g_dwPollSeconds);
+    AddInLogMessageText ("%s: Secrets are never options: NSHTEST_TOKEN (coordinator token; DOMLEM_TOKEN overrides it) and DOMLEM_CERTPW come from the environment, else notes.ini", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s: Registration of missing users (-switch): certifier ID with DOMLEM_CERTPW is used directly, else the Domino CA", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s:   -ca           Domino CA to certify with (when no certifier ID with password)", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s:   -certid       certifier ID file (password: environment variable DOMLEM_CERTPW)", NOERROR, g_szLogPrefix);
@@ -387,12 +670,14 @@ static BOOL IsFlagOption (const char *pszName)
 }
 
 
-/* The options a job may set */
+/* The options a job may set (the parameters of a run command): what a job contains, never where it works or whom it
+ * reaches. The database, the agent (the job name "agent:<name>" picks one of -db), the recipients and the directory
+ * filter stay what the command line says, so a command over the network cannot point a lemming elsewhere. */
 
 static BOOL IsJobOption (const char *pszName)
 {
-    static const char *Names[] = { "db", "agent", "agenttimeout", "mailto", "mailrandom", "mailfilter", "mailnab",
-                                   "mailsize", "mailtext", "mailattach", "mailattachsize", "mailattachtype" };
+    static const char *Names[] = { "agenttimeout", "mailrandom", "mailsize", "mailtext", "mailattach", "mailattachsize",
+                                   "mailattachtype", "mailsubject", "mailsentcopy" };
 
     for (size_t nName = 0; nName < sizeof (Names) / sizeof (Names[0]); nName++)
     {
@@ -437,8 +722,9 @@ static STATUS ApplyOption (const OptionPair &Option, OptionScope Scope, std::str
     if (0 == StrICmp (pszName, "switch"))
     {
         /* "switch" or "switch=1"; "switch=0" turns it off */
-        g_bSwitch = !Option.bHasValue || (Value != "0" && 0 != StrICmp (Value.c_str(), "false") && 0 != StrICmp (Value.c_str(), "no"));
-        bOK       = TRUE;
+        g_bSwitch    = !Option.bHasValue || (Value != "0" && 0 != StrICmp (Value.c_str(), "false") && 0 != StrICmp (Value.c_str(), "no"));
+        g_bSwitchSet = TRUE;
+        bOK          = TRUE;
     }
     else if (0 == StrICmp (pszName, "nowait"))
     {
@@ -452,6 +738,8 @@ static STATUS ApplyOption (const OptionPair &Option, OptionScope Scope, std::str
         bOK = SetText (g_szServer, sizeof (g_szServer), Value);
     else if (0 == StrICmp (pszName, "db"))
         bOK = SetText (g_szDbFilePath, sizeof (g_szDbFilePath), Value);
+    else if (0 == StrICmp (pszName, "dbopen"))
+        bOK = SetText (g_szOpenDbFilePath, sizeof (g_szOpenDbFilePath), Value);
     else if (0 == StrICmp (pszName, "agent"))
         bOK = SetText (g_szAgentName, sizeof (g_szAgentName), Value);
     else if (0 == StrICmp (pszName, "agenttimeout"))
@@ -459,7 +747,34 @@ static STATUS ApplyOption (const OptionPair &Option, OptionScope Scope, std::str
     else if (0 == StrICmp (pszName, "mailto"))
         bOK = SetText (g_szMailTo, sizeof (g_szMailTo), Value);
     else if (0 == StrICmp (pszName, "mailrandom"))
-        bOK = bValue && ParseUnsigned (Value.c_str(), 50, &g_MailSettings.dwRandomCount);
+    {
+        bOK = bValue && ParseRange (Value.c_str(), 50, &g_MailSettings.RandomCount);
+
+        if (bOK)
+            g_MailSettings.bRandomCountSet = TRUE;
+    }
+    else if (0 == StrICmp (pszName, "mailsubject"))
+    {
+        bOK = bValue && ((0 == StrICmp (Value.c_str(), "random")) || (0 == StrICmp (Value.c_str(), "fixed")));
+
+        if (bOK)
+            g_MailSettings.Subject = (0 == StrICmp (Value.c_str(), "random")) ? SUBJECT_RANDOM : SUBJECT_FIXED;
+    }
+    else if (0 == StrICmp (pszName, "mailsentcopy"))
+    {
+        bOK = TRUE;
+
+        if (!bValue)
+            bOK = FALSE;
+        else if ((0 == StrICmp (Value.c_str(), "yes")) || (Value == "1"))
+            g_MailSettings.SentCopy = SENTCOPY_ON;
+        else if ((0 == StrICmp (Value.c_str(), "no")) || (Value == "0"))
+            g_MailSettings.SentCopy = SENTCOPY_OFF;
+        else if (0 == StrICmp (Value.c_str(), "auto"))
+            g_MailSettings.SentCopy = SENTCOPY_AUTO;
+        else
+            bOK = FALSE;
+    }
     else if (0 == StrICmp (pszName, "mailfilter"))
     {
         g_MailSettings.RandomFilter = Value;
@@ -580,12 +895,6 @@ static STATUS ApplyJobParams (const std::string &Params, std::string &Err)
             goto Done;
     }
 
-    if (g_MailSettings.dwRandomCount && g_MailSettings.RandomFilter.empty())
-    {
-        Err   = "mailrandom needs mailfilter, a formula that selects the test users only";
-        error = ERR_MISC_INVALID_ARGS;
-    }
-
 Done:
 
     return error;
@@ -641,13 +950,6 @@ STATUS ParseCommandLine (int argc, char *argv[])
         }
     }
 
-    /* Random recipients without a filter could mail real users: refuse to start */
-    if (!error && g_MailSettings.dwRandomCount && g_MailSettings.RandomFilter.empty())
-    {
-        AddInLogMessageText ("%s: -mailrandom needs -mailfilter, a formula that selects the test users only", NOERROR, g_szLogPrefix);
-        error = ERR_MISC_INVALID_ARGS;
-    }
-
     /* The jobs start from what the command line says */
     if (!error)
         SaveJobDefaults();
@@ -658,11 +960,62 @@ Done:
 }
 
 
+/* A setting from outside the command line: a secret (a password, the token), which is never an option because it would
+ * show up in the process list and in "show tasks", or a default for every lemming of the server (the coordinator).
+ * First the environment of the server process (set it before the server starts, for example in the container), then
+ * notes.ini (set config; readable there in plain text for anybody who can read notes.ini or run "show config"). */
+
+static BOOL GetSetting (const char *pszName, std::string &Value)
+{
+    BOOL        bFound    = FALSE;
+    const char *pszValue  = getenv (pszName);
+    char        szValue[256] = {0};
+
+    Value.clear();
+
+    if (!IsNullStr (pszValue))
+    {
+        Value  = pszValue;
+        bFound = TRUE;
+    }
+    else if (OSGetEnvironmentString (pszName, szValue, (WORD) sizeofstring (szValue)) && szValue[0])
+    {
+        Value  = szValue;
+        bFound = TRUE;
+    }
+
+    memset (szValue, 0, sizeof (szValue));
+    return bFound;
+}
+
+
 STATUS LNPUBLIC AddInMain (HMODULE hResourceModule, int argc, char far *argv[])
 {
     STATUS error = NOERROR;
 
     AddInSetStatusText ("Starting");
+
+    /* Defaults for every lemming of this server, so that "load domlem" needs no option; the command line overrides them.
+     * The identity switch is set here or on the command line, never by the coordinator: it writes into the directory. */
+    {
+        std::string Value;
+
+        if (GetSetting ("DOMLEM_COORDINATOR", Value) && !SetText (g_szCoordinatorURL, sizeof (g_szCoordinatorURL), Value))
+            AddInLogMessageText ("%s: DOMLEM_COORDINATOR is too long: ignored", NOERROR, g_szLogPrefix);
+
+        if (GetSetting ("DOMLEM_SWITCH", Value))
+        {
+            if ((Value == "1") || (0 == StrICmp (Value.c_str(), "yes")) || (0 == StrICmp (Value.c_str(), "true")))
+                g_bSwitch = g_bSwitchSet = TRUE;
+            else if ((Value == "0") || (0 == StrICmp (Value.c_str(), "no")) || (0 == StrICmp (Value.c_str(), "false")))
+            {
+                g_bSwitch    = FALSE;
+                g_bSwitchSet = TRUE;
+            }
+            else
+                AddInLogMessageText ("%s: DOMLEM_SWITCH=%s is not 1/yes/true or 0/no/false: ignored", NOERROR, g_szLogPrefix, Value.c_str());
+        }
+    }
 
     error = ParseCommandLine (argc, argv);
 
@@ -681,15 +1034,37 @@ STATUS LNPUBLIC AddInMain (HMODULE hResourceModule, int argc, char far *argv[])
         }
     }
 
+    /* No certifier given: the Domino CA of the server's own organization, "CN=srv/OU=x/O=Org" gives "/OU=x/O=Org". Set
+     * also without -switch: the coordinator's worker options may still ask for it. Logged when it is used. */
+    if (g_RegSetup.certifier.caName.empty() && g_RegSetup.certifier.file.empty())
+    {
+        const char *pszOrg = strchr (g_szServer, '/');
+
+        if ((0 == strncmp (g_szServer, "CN=", 3)) && pszOrg && pszOrg[1])
+        {
+            g_RegSetup.certifier.caName = pszOrg;
+            g_bCADerived                = TRUE;
+        }
+    }
+
+    /* ID files and attachment data of lemmings that crashed: removed, the files of running lemmings stay */
+    RemoveStaleTempFiles();
+
     /* Registration happens on the Domino server we work against. The certifier password is not an option: it would
        show up in the process list and in "show tasks" */
     g_RegSetup.server = g_szServer;
 
     {
-        char szCertPassword[256] = {0};
+        std::string Secret;
 
-        if (OSGetEnvironmentString ("DOMLEM_CERTPW", szCertPassword, (WORD) sizeofstring (szCertPassword)))
-            g_RegSetup.certifier.password = szCertPassword;
+        if (GetSetting ("DOMLEM_CERTPW", Secret))
+            g_RegSetup.certifier.password = Secret;    /* kept only in the registration setup, needed for every new user */
+
+        /* The coordinator's token: NSHTEST_TOKEN like every nshtestherd component, DOMLEM_TOKEN wins when both are set */
+        if (GetSetting ("DOMLEM_TOKEN", Secret) || GetSetting ("NSHTEST_TOKEN", Secret))
+            g_Token = Secret;
+
+        std::fill (Secret.begin(), Secret.end(), '\0');
     }
 
     {
@@ -703,9 +1078,11 @@ STATUS LNPUBLIC AddInMain (HMODULE hResourceModule, int argc, char far *argv[])
         Config.pollMs     = (int) (g_dwPollSeconds * 1000);
         Config.waitForAccount = g_bWaitForAccount;      /* default: more lemmings than accounts, the extra ones wait and show it */
         Config.httpTimeoutSeconds = 3;     /* a task must end promptly when the server shuts down */
+        Config.token      = g_Token;
 
-        AddInLogMessageText ("%s: %s, coordinator [%s], Domino server [%s], identity: %s", NOERROR, g_szLogPrefix,
-                             DOMLEM_VERSION, g_szCoordinatorURL, g_szServer, g_bSwitch ? "account (-switch)" : "current");
+        AddInLogMessageText ("%s: %s, coordinator [%s]%s, Domino server [%s], identity: %s", NOERROR, g_szLogPrefix,
+                             DOMLEM_VERSION, g_szCoordinatorURL, g_Token.empty() ? "" : " with token", g_szServer,
+                             g_bSwitch ? "account (-switch)" : (g_bSwitchSet ? "current" : "current, unless the coordinator's worker options ask for switch"));
 
         HerdClient Client (Config, Hooks);
         End = Client.Run();

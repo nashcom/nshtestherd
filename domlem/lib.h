@@ -54,6 +54,11 @@ std::string ErrorText (STATUS error);
  * document has a name, its full name (pszRetFullName may be NULL). Looks into the Domino Directory of pszServer. */
 BOOL LookupUser (const char *pszServer, const char *pszKey, char *pszRetFullName, WORD wMaxFullName);
 
+/* The mail file of a user from its person document: MailServer and MailFile. Returns TRUE when the document has a mail
+ * file; pszRetMailServer may come back empty (the person document has no mail server). Looks into the Domino Directory
+ * of pszServer. */
+BOOL LookupMailFile (const char *pszServer, const char *pszUserName, char *pszRetMailServer, WORD wMaxMailServer, char *pszRetMailFile, WORD wMaxMailFile);
+
 /* Searches the documents of a database with a selection formula and collects their note IDs in an ID table.
  * *phNoteIDTable is NULLHANDLE: a table is created and the caller destroys it with IDDestroyTable(); else the IDs are
  * added to the given table. pszViewTitle is the view title for formulas that need one, NULL: none.
@@ -63,6 +68,11 @@ STATUS GetDocsByFormula (DBHANDLE hDb, const char *pszFormula, const char *pszVi
 /* Picks one random document that matches the formula: its note ID in *pRetNoteID, the number of matches in
  * *pdwMatches (may be NULL). ERR_NOT_FOUND when no document matches. Built on GetDocsByFormula(). */
 STATUS GetRandomDocByFormula (DBHANDLE hDb, const char *pszFormula, const char *pszViewTitle, NOTEID *pRetNoteID, DWORD *pdwMatches);
+
+/* Removes the temporary files a crashed lemming left in the Notes data directory: "domlem_<test_id>_<pid>.id" (an ID
+ * file) and "domlem_att_<pid>_<mail>_<n>.tmp" (attachment data), but only when the process <pid> no longer exists, so
+ * the files of the other lemmings on the server stay. Linux only (elsewhere it does nothing). */
+void RemoveStaleTempFiles();
 
 /* Is this a safe single file name component: letters, digits, dot, dash, underscore; no path separators, no "..", at most
  * wMax characters? Used before a value from outside becomes part of a path. */

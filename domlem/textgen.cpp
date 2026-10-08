@@ -132,6 +132,34 @@ std::string TextGenerator::Generate (size_t nBytes, unsigned long ulSeed) const
 }
 
 
+std::string TextGenerator::Subject (unsigned long ulSeed) const
+{
+    std::mt19937 Random ((std::mt19937::result_type) ulSeed);
+    std::string  Text;
+
+    if (TEXT_FUNNY == m_Style)
+        Text = g_FunnySentences[Random() % COUNT_OF (g_FunnySentences)];
+    else
+    {
+        size_t nWords = 3 + (Random() % 5);
+
+        for (size_t nWord = 0; nWord < nWords; nWord++)
+        {
+            std::string Word = g_LoremWords[Random() % COUNT_OF (g_LoremWords)];
+
+            if (0 == nWord)
+                Word[0] = (char) (Word[0] - 'a' + 'A');
+            else
+                Text += ' ';
+
+            Text += Word;
+        }
+    }
+
+    return Text;
+}
+
+
 /* Sentences of 6 to 14 words, 2 to 5 sentences per paragraph, an empty line between paragraphs */
 
 std::string TextGenerator::GenerateLorem (size_t nBytes, unsigned long ulSeed) const

@@ -17,6 +17,8 @@
 #   HERD_PORT        port, on the host and in the container   (default 8788)
 #   HERD_USERS       generated accounts: load000001, load000002, ...  (default 100)
 #   RUNNER_CLIENTS   logical clients per runner               (default 10)
+#   NSHTEST_TOKEN    shared token: every call but /health needs "Authorization: Bearer <token>"
+#                    (default: none; set it whenever the port is reachable from other machines)
 #
 # Accounts: this file uses --generate. To use your own users instead, replace the
 # "--generate" line in the herd command with the two lines marked "own accounts"
@@ -46,6 +48,9 @@ services:
       # - "--csv"
       # - "/users.csv"
 
+    environment:
+      NSHTEST_TOKEN: "${NSHTEST_TOKEN:-}"
+
     ports:
       - "${HERD_BIND:-127.0.0.1}:${HERD_PORT:-8788}:${HERD_PORT:-8788}"
 
@@ -68,6 +73,9 @@ services:
 
     depends_on:
       - herd
+
+    environment:
+      NSHTEST_TOKEN: "${NSHTEST_TOKEN:-}"
 
     command:
       - "--runner"
