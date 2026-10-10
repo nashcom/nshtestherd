@@ -5,3 +5,5 @@ test_core
 test_runner
 dist
 .git
+nshtestusers
+test_users

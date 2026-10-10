@@ -47,6 +47,7 @@ One executable, two modes:
 - [Run with Docker](#run-with-docker) - container image and Docker Compose stack
 - [Build](#build) - from source
 - [Server mode](#server-mode) - options, account files, metrics, sizing
+- [Making the user CSV](#making-the-user-csv-nshtestusers) - numbered users or random unique names for `--csv`
 - [Runner (optional)](#runner-optional) - a worker host that launches your test program
 - [Security](#security), [Troubleshooting](#troubleshooting), [Status and limits](#status-and-limits)
 - [Tests](#tests), [Repository layout](#repository-layout), [Releasing](#releasing-maintainers), [License](#license)
@@ -438,13 +439,14 @@ lacks), and the `scratch` stage copies in just the binary.
 Requirements: a C++17 compiler (g++ 7+ or newer) and GNU make. On Windows use MinGW/MSYS2 (or the direct MSVC command below).
 
 ```bash
-make          # builds ./nshtestherd (the product, one binary)
-make test     # also builds and runs test_core and test_runner (test programs, not part of the product)
+make          # builds ./nshtestherd (the product) and ./nshtestusers (the user CSV tool)
+make test     # also builds and runs test_core, test_runner and test_users (test programs, not part of the product)
 make clean
 ```
 
 `make test` builds extra programs from `tests/`; they are separate executables and are not part of `nshtestherd`.
-For deployment only the `nshtestherd` binary is needed.
+For deployment only the `nshtestherd` binary is needed; `nshtestusers` is a separate small program for making the account CSV
+(Windows with MinGW: `-lbcrypt` is added by the Makefile).
 
 Direct compiler builds (product only):
 
@@ -543,6 +545,50 @@ rate(nshtestherd_jobs_ended_total{result="failed"}[5m]) # failed jobs per second
   bytes per client.
 - **Running it.** The server runs in the foreground and logs to stdout/stderr; stop it with Ctrl+C or SIGTERM (graceful).
   As a service use Docker/Compose (`restart: always`) or your own service manager. A restart is a fresh herd.
+
+## Making the user CSV (nshtestusers)
+
+`nshtestusers` writes the account CSV that `--csv` reads (and that your registration tool takes): numbered users like
+`--generate`, or users with random unique names. It is built by `make` together with `nshtestherd` (source in
+`tools/nshtestusers/`, it uses `src/csv.cpp`, so a file it writes is read by the same parser as the coordinator's) and
+is also in the container image. It only writes the file; creating the users in your system stays with your registration tool.
+
+```bash
+nshtestusers --generate 500 --output users.csv                  # load000001 ... load000500, password TestPassword
+nshtestusers --generate 200 --prefix perf --domain lab.example.com --random-passwords --output users.csv
+nshtestusers --names --generate 200 --domain lab.example.com --random-passwords --output users.csv
+nshtestusers --check users.csv                                  # validate a CSV: format, duplicate names and addresses
+
+# the container image has it too (the file goes to standard output)
+docker run --rm --entrypoint /nshtestusers ghcr.io/nashcom/nshtestherd --generate 50 > users.csv
+```
+
+| Option                  | Default        | Meaning                                                                                      |
+| ----------------------- | -------------- | -------------------------------------------------------------------------------------------- |
+| `--generate <n>`        | `100`          | number of users (1 to 1000000)                                                               |
+| `--prefix <name>`       | `load`         | numbered users: name prefix (`load000001`); the first name is the prefix with a capital      |
+| `--start <n>`           | `1`            | numbered users: first number, to continue an earlier list                                    |
+| `--password <pw>`       | `TestPassword` | the password of every user                                                                   |
+| `--random-passwords`    | off            | a different random password per user (not together with `--password`)                        |
+| `--password-length <n>` | `16`           | length of the random passwords (8 to 128)                                                    |
+| `--domain <name>`       | `example.com`  | mail domain                                                                                  |
+| `--names`               | off            | random unique names (`anna.meyer@example.com`) instead of numbers                            |
+| `--seed <n>`            | random         | with `--names`: the same seed gives the same list (it is printed when not given)             |
+| `--exclude <file>`      | none           | with `--names`: skip the names of an earlier list, so a second batch does not collide        |
+| `--output <file>`       | stdout         | write the file, readable for the owner only (mode 0600); `--force` replaces an existing file |
+| `--header`              | off            | write the header row `FirstName,LastName,Password,Shortname,InternetAddress`                 |
+| `--check <file>`        |                | validate a user CSV with the parser of `nshtestherd` and look for duplicates; then exit      |
+
+With the default options the numbered list is identical to what `nshtestherd --generate` hands out (`--prefix`,
+`--password` and `--domain` mean the same). `--names` takes first and last names from built-in lists (ASCII only, 1210
+and 1270 names: 1536700 different users). Every combination is used at most once, and short names (`first.last`) and
+addresses are checked for duplicates before the file is written. More users than combinations is an error.
+
+Random passwords come from the operating system's generator (`/dev/urandom`, `BCryptGenRandom`): every character is
+equally likely among 55 letters and digits (letters that look alike, `0 O 1 l I`, are not used) and a password
+without an upper case letter, a lower case letter and a digit is drawn again. They are never printed to the console.
+On a file system that does not keep file modes (a Windows drive in WSL, FAT) the file cannot be made owner-only.
+A million users take a few seconds. Exit codes: 0 ok, 1 failure (cannot write, check failed), 2 usage error.
 
 ## Runner (optional)
 
@@ -743,7 +789,7 @@ nshtestherd is a test tool for a trusted network. Know what an open port means:
 ## Tests
 
 ```bash
-make test                            # builds and runs test_core and test_runner
+make test                            # builds and runs test_core, test_runner and test_users
 tests/integration.sh ./nshtestherd   # HTTP layer with curl (default port 18788, set HERD_TEST_PORT)
 tests/testrun.sh                     # longer run, job results add up (60 s; tests/testrun.sh 600 for 10 minutes; port 18789)
 ```
@@ -752,6 +798,7 @@ tests/testrun.sh                     # longer run, job results add up (60 s; tes
 | ---------------- | -------------------------------------------------------------------------------------- |
 | `test_core`      | CSV, wire format, `--generate`, allocation, exhaustion, concurrency, commands, metrics |
 | `test_runner`    | Runner against an in-process coordinator: dummy clients, fill and cap, child programs  |
+| `test_users`     | nshtestusers: name lists, numbered and random users, passwords, CSV                    |
 | `integration.sh` | Real HTTP with curl: limits, methods, CSV, retry keys, metrics, shutdown               |
 | `testrun.sh`     | Coordinator and two runners under random commands: job results counted exactly once    |
 
@@ -790,7 +837,8 @@ src/httpclient.*  minimal HTTP client (runner only)
 src/process.*     direct program launch, no shell (runner only)
 src/main.cpp      command line, signals
 src/version.h     NSHTESTHERD_VERSION, the single source of the version
-tests/            test_core, test_runner, integration.sh, testrun.sh
+tools/nshtestusers/  nshtestusers: makes the user CSV (numbered users or random unique names)
+tests/            test_core, test_runner, test_users, integration.sh, testrun.sh
 examples/         users.csv, worker.sh (Bash worker, no Domino calls)
 examples/k6/      k6 worker example: script, run.sh (hands-free end-to-end run), compose file, README
 domlem/           Domino add-in worker (Notes C API): client core + Notes hooks, user registration, makefile

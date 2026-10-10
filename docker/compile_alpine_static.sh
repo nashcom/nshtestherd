@@ -6,7 +6,8 @@
 # Dockerfile RUN or interactively inside your own build container.
 #
 # Usage: docker/compile_alpine_static.sh [output-path]
-# (default output path: ./nshtestherd, i.e. the project root)
+# (default output path: ./nshtestherd, i.e. the project root; nshtestusers, the user CSV tool,
+# is built next to it)
 set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -61,5 +62,22 @@ g++ $CXXFLAGS -static -s -Wl,--gc-sections -o "$OUT" \
     "$SCRIPT_DIR/fortify_shim.o" \
     -lssp_nonshared
 
-echo "==> done: $OUT"
-file "$OUT" 2>/dev/null || true
+echo "==> compiling and linking nshtestusers (the user CSV tool)"
+# Its own sources (tools/nshtestusers) and src/csv.o, which the build above has made. The output goes next to
+# nshtestherd.
+USERS_OUT="$(dirname "$OUT")/nshtestusers"
+USERS_OBJS=""
+for f in tools/nshtestusers/*.cpp; do
+    USERS_OBJS="$USERS_OBJS ${f%.cpp}.o"
+done
+
+make $USERS_OBJS CXXFLAGS="$CXXFLAGS"
+
+g++ $CXXFLAGS -static -s -Wl,--gc-sections -o "$USERS_OUT" \
+    $USERS_OBJS \
+    src/csv.o \
+    "$SCRIPT_DIR/fortify_shim.o" \
+    -lssp_nonshared
+
+echo "==> done: $OUT $USERS_OUT"
+file "$OUT" "$USERS_OUT" 2>/dev/null || true

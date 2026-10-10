@@ -5,6 +5,22 @@ that has no section here, and prints the section as the text for the GitHub rele
 
 ## 0.9.1
 
+**New tool: `nshtestusers`.** Makes the account CSV for `--csv` (and for your registration tool): numbered users or
+users with random unique names. It has its own section in the README ("Making the user CSV") and lives in
+`tools/nshtestusers/`; it uses `src/csv.cpp`, so the file it writes is read by the same parser as the coordinator's.
+
+- Numbered users with the options of `--generate` (`--generate`, `--prefix`, `--password`, `--domain`) plus `--start`
+  to continue an earlier list; with the defaults the list is identical to what `--generate` hands out.
+- Random unique names (`--names`): 1210 first and 1270 last names (ASCII), every combination at most once, short
+  names and addresses checked for duplicates; `--seed` for the same list again, `--exclude <file>` to skip the names
+  of an earlier list.
+- Passwords: one for everybody, or `--random-passwords` (a different one per user, from the operating system's
+  generator, length 8 to 128).
+- `--output` writes the file readable for the owner only and does not replace an existing file without `--force`;
+  `--check <file>` validates a user CSV.
+- `make` builds it with `nshtestherd`, `make test` runs the new `test_users`, and the container image has it as
+  `/nshtestusers` (`docker run --rm --entrypoint /nshtestusers ghcr.io/nashcom/nshtestherd --generate 50 > users.csv`).
+
 **Renamed environment variables.** The variables the runner sets for its programs are now `NSHTEST_*` instead of
 `NSH_*`: `NSHTEST_TEST_ID`, `NSHTEST_FIRSTNAME`, `NSHTEST_LASTNAME`, `NSHTEST_SHORTNAME`, `NSHTEST_INTERNETADDRESS`,
 `NSHTEST_PASSWORD`, `NSHTEST_JOB`, `NSHTEST_COMMAND_ID`, `NSHTEST_SERVER`. The old names are still set and

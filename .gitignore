@@ -8,8 +8,10 @@
 
 # Built programs: product and test binaries (Linux, no extension) ...
 /nshtestherd
+/nshtestusers
 /test_core
 /test_runner
+/test_users
 
 # ... and Windows
 *.exe
@@ -40,6 +42,7 @@ Thumbs.db
 *.tmp
 *.bak
 *.log
+test_users_output.csv
 
 # Release build output
 dist/

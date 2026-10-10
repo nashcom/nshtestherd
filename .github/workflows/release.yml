@@ -66,6 +66,7 @@ jobs:
           for arch in amd64 arm64; do
             CID=$(docker create "nshtestherd:local-$arch")
             docker cp "$CID:/nshtestherd" "dist/nshtestherd-$VERSION-$arch"
+            docker cp "$CID:/nshtestusers" "dist/nshtestusers-$VERSION-$arch"
             docker rm "$CID" >/dev/null
           done
 
@@ -74,11 +75,13 @@ jobs:
         run: |
           chmod +x "dist/nshtestherd-$VERSION-amd64"
           "dist/nshtestherd-$VERSION-amd64" --version
+          chmod +x "dist/nshtestusers-$VERSION-amd64"
+          "dist/nshtestusers-$VERSION-amd64" --version
 
       - name: Package release assets
         run: |
           cd dist
-          for f in nshtestherd-*; do
+          for f in nshtestherd-* nshtestusers-*; do
             sha256sum "$f" > "$f.sha256"
           done
 
@@ -87,6 +90,7 @@ jobs:
         with:
           files: |
             dist/nshtestherd-*
+            dist/nshtestusers-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
