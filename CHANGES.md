@@ -33,16 +33,24 @@ Workers and runner:
   the next command. Only `stop` (or the worker's own shutdown) ends a worker; `error` is left for a worker that cannot
   work at all. For the runner a failing program is a failed job, not a failed client (exit code 0).
 - A newer `idle`, `run` or `stop` ends a job that is still running; it is reported as `stopped`.
+- A job result is kept until the coordinator has accepted a report that carried it: when the next job ends first (for
+  example `stopped` by a `run` that then cannot start) after a failed report, the client delivers the old result before
+  it replaces it, so no job is lost from the counts.
 - The client core cuts status messages to the coordinator's limit instead of being refused on every poll.
 - The protocol logic of the runner is now a shared client core (`src/herdclient.*`) that other workers can use.
 - `examples/worker.sh` and the k6 example report job results and send the token.
 
 New: **domlem**, a Domino add-in worker (Notes C API) built on the shared client core, with the jobs `dbopen`,
 `agent` / `agent:<name>`, `mail` and `mailtest`, and optional user registration and identity switch (`-switch`).
-See [domlem/README.md](domlem/README.md).
+No database stays open between two operations: each one opens what it needs and closes it in reverse order (notes before
+their database, the agent before its database), and every database is closed with `NSFDbCloseSession` unless
+`-closesession 0` is given. See [domlem/README.md](domlem/README.md).
 
 Build: objects are rebuilt when the compiler, the C library or the flags change (`.build-id`) and when the Makefile
 changes; objects are built with `-fPIC`.
+
+Tests: `tests/testrun.sh [seconds]` (default 60) runs a coordinator with two runners under random commands, stops
+them, and checks that every job result the runners logged was counted exactly once (`/status` and `/metrics`).
 
 ## 0.9.0
 

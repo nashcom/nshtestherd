@@ -1,11 +1,15 @@
 /* dominoload.h - the operations domlem performs against a Domino server (implemented in dominoload.cpp)
  *
- * DominoLoad owns the Notes handles: Init() opens the test database, Term() (or the destructor) releases everything.
  * Every test is a method, Op<Name>(). It does one operation and returns the Notes STATUS; Message has the result for
  * the coordinator (or the error text when it fails). New tests are added one after another as new methods.
  *
- * The handles belong to the identity the process has when Init() runs: with an identity switch (-switch), call
- * Init() after the switch.
+ * No database stays open between two operations, as a user closes a database when done with it: every operation opens
+ * what it needs, closes its notes (and other objects) before their database, and closes the database (CloseDb: with the
+ * session when -closesession is on). What is read from the directory for a job (the recipient list) is read once, with
+ * the directory closed again before the job opens the databases it works in. Init() only remembers the settings and
+ * builds the paths; it opens nothing.
+ *
+ * The operations run with the identity the process has: with an identity switch (-switch), call Init() after the switch.
  *
  *   DominoLoad Load;
  *   std::string Message;
@@ -81,56 +85,56 @@ public:
     /* The worker, for subjects and attachment names: "[domlem t<test id> <short name> #<n>]" */
     void SetWorker (const char *pszTestId, const char *pszShortName);
 
-    /* Opens the test database (pszServer may be empty: local; pszDbFile may be empty: no database, for jobs that need
-     * none, like the mail job). On an error Err has the failing call with its error text
-     * and nothing stays open. Calling it again closes what was open before and resets the counters. */
+    /* Prepares a job: remembers the server and the database of the job (pszServer may be empty: local; pszDbFile may be
+     * empty: no database, like the mail jobs), builds its path, resets the counters. Opens nothing. On an error Err has
+     * the failing call with its error text. */
     STATUS Init (const char *pszServer, const char *pszDbFile, std::string &Err);
 
-    /* Releases everything. Safe to call more than once. */
+    /* Forgets the job. No handle is open between operations, so there is nothing to close. Safe to call more than once. */
     void Term();
 
     BOOL IsInit() const { return m_bInit; }
 
-    /* The Domino logical name of the open test database: the file part of its canonical path (NSFDbPathGet, split by
-     * OSPathNetParse), relative to the data directory, for example "names.nsf" or "mtdata/mtstore.nsf". Empty when no
-     * database is open or the path cannot be read. */
-    std::string GetDbLogicalPath() const;
+    /* The Domino logical name of the job's database: opens it, takes the file part of its canonical path (NSFDbPathGet,
+     * split by OSPathNetParse), relative to the data directory ("names.nsf", "mtdata/mtstore.nsf"), and closes it again.
+     * Empty when there is no database or it cannot be opened or named; Err then has the reason. */
+    std::string GetDbLogicalPath (std::string &Err) const;
 
-    /* ---- the tests ---- */
+    /* ---- the tests: each one opens what it needs and closes it again ---- */
 
     /* Opens the database as a new connection, reads the access level and closes it again (the test of a connect) */
     STATUS OpDbOpen (std::string &Message);
 
-    /* Runs the agent once. The agent is opened with the first run and stays open until Term() */
+    /* Runs the agent once: opens the database and the agent, runs it, closes the agent and then the database */
     STATUS OpRunAgent (std::string &Message);
 
-    /* Crafts one message and writes it into the mail.box of the server (and a sent copy into the sender's mail file when
-     * the settings ask for it). The mail.box is opened with the first send. */
+    /* Crafts one message: a sent copy into the sender's mail file when the settings ask for it, then the message into the
+     * mail.box of the server. Each database is opened for its note and closed again. */
     STATUS OpSendMail (std::string &Message);
 
 private:
 
     STATUS LoadRandomRecipients (std::string &Err);
-    STATUS OpenSentCopy (std::string &Err);
+    STATUS FindSentCopyPath (std::string &Err);
+    STATUS PrepareMail (std::string &Err);
 
-    DominoLoad (const DominoLoad &);                /* not copyable: owns Notes handles */
+    DominoLoad (const DominoLoad &);                /* not copyable */
     DominoLoad &operator= (const DominoLoad &);
 
     BOOL        m_bInit;                    /* Init() succeeded */
-    DBHANDLE    m_hDb;                      /* the test database, NULLHANDLE when Init() got no database name */
-    char        m_szFullPath[MAXPATH+1];    /* server!!path of the test database */
+    char        m_szFullPath[MAXPATH+1];    /* server!!path of the job's database, empty: none */
     std::string m_DbFile;                   /* the database name as given, for messages */
 
     std::string m_AgentName;
     DWORD       m_dwAgentTimeLimit;
-    AgentRunner m_Agent;
 
-    std::string m_Server;                   /* server of the test database and of the mail.box */
+    std::string m_Server;                   /* server of the job's database and of the mail.box */
     std::string m_UserName;                 /* the identity of the process, the sender of the mail */
     std::string m_MailTo;
     MailSettings m_MailSettings;
-    std::vector<std::string> m_RandomNames;     /* full names of the people matching the filter, loaded with the first mail */
+    std::vector<std::string> m_RandomNames;     /* full names of the people matching the filter, read with the first mail */
     BOOL         m_bRandomLoaded;
+    BOOL         m_bMailPrepared;           /* the mail client has the settings, the paths and the sent copy decision of this job */
     MailClient  m_Mail;
     std::string m_TestId;                   /* the worker, for subjects and attachment names */
     std::string m_ShortName;

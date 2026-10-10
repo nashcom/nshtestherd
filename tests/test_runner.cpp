@@ -88,10 +88,25 @@ struct TestServer
     HttpServer   server;
     std::thread  thread;
     std::string  token;   // set before Start(): every call but /health then needs it
+    std::atomic<int> rejectReports;   // the next n worker status reports (POST /status) get a 503, as if the network failed
 
     explicit TestServer(int port)
-        : server(MakeConfig(port), [this](const HttpRequest &r) { return HandleRequest(herd, r, token); })
+        : server(MakeConfig(port), [this](const HttpRequest &r) { return Handle(r); }), rejectReports(0)
     {
+    }
+
+    HttpResponse Handle(const HttpRequest &r)
+    {
+        if ("POST" == r.method && "/status" == r.path && rejectReports > 0)
+        {
+            rejectReports--;
+
+            HttpResponse down;
+            down.status = 503;
+            return down;
+        }
+
+        return HandleRequest(herd, r, token);
     }
 
     static ServerConfig MakeConfig(int port)
@@ -542,14 +557,16 @@ public:
     std::atomic<int>  waiting;      // calls of Waiting()
     std::atomic<int>  aborts;       // calls of JobAbort()
     std::atomic<int>  stateChanges; // calls of StateChanged()
-    std::string       waitReason;   // written by the client thread: read it after join()
+    std::atomic<bool> startFails;   // JobStart() refuses the job
+    std::atomic<int> *rejectOnAbort; // JobAbort() makes the coordinator refuse this many reports (the network fails right then)
+    std::string       waitReason;  // written by the client thread: read it after join()
     std::string       registeredAs; // written by the client thread: read it after join()
     std::string       startedJob;
     std::string       startedParams; // written by the client thread: read it after join()
     std::string       workerOptions; // written by the client thread: read it after join()
     std::string       lastState;    // written by the client thread: read it after join()
 
-    CustomHooks() : stop(false), steps(0), failAfter(0), setupFails(false), longMessage(false), waiting(0), aborts(0), stateChanges(0) {}
+    CustomHooks() : stop(false), steps(0), failAfter(0), setupFails(false), longMessage(false), waiting(0), aborts(0), stateChanges(0), startFails(false), rejectOnAbort(NULL) {}
 
     void StateChanged(const std::string &state, const std::string &) override
     {
@@ -560,6 +577,9 @@ public:
     void JobAbort() override
     {
         aborts++;
+
+        if (rejectOnAbort)
+            *rejectOnAbort = 1;
     }
 
     void Waiting(const std::string &reason) override
@@ -586,11 +606,18 @@ public:
         return true;
     }
 
-    bool JobStart(const HerdJobContext &context, std::string &message, std::string &) override
+    bool JobStart(const HerdJobContext &context, std::string &message, std::string &err) override
     {
         startedJob    = context.job;
         startedParams = context.params;
         message       = "custom " + context.job;
+
+        if (startFails)
+        {
+            err = "cannot start";
+            return false;
+        }
+
         return true;
     }
 
@@ -779,6 +806,40 @@ static void TestHerdClientFailures()
     }
 }
 
+// A result the coordinator has not accepted yet must not be replaced by the next one. Here the report of "stopped" (job 1,
+// ended by the next run command) fails, and that run command fails to start at once, so job 2 ends before any report went
+// through: both results must still be counted.
+static void TestResultNotLost()
+{
+    TestServer srv(g_url.port);
+
+    if (!srv.Start(1))
+        exit(0);
+
+    CustomHooks      hooks;
+    HerdClientConfig cfg = CustomConfig("result-not-lost");
+    HerdEnd          end = HERD_END_FAILED;
+    hooks.rejectOnAbort  = &srv.rejectReports;
+    std::thread rt([&]() { HerdClient client(cfg, hooks); end = client.Run(); });
+
+    CHECK(WaitFor([]() { return Call("GET", "/status")["clients_total"] == "1"; }, 10000));
+    Call("POST", "/command", "test_id=1&command=run&job=custom");
+    CHECK(WaitFor([]() { return Client(1)["state"] == "running"; }, 10000));
+
+    hooks.startFails = true;
+    Call("POST", "/command", "test_id=1&command=run&job=custom");
+    CHECK(WaitFor([]() { Form c = Client(1); return c["state"] == "idle" && c["last_job_id"] == "2" && c["last_job_result"] == "failed"; }, 10000));
+
+    Form s = Call("GET", "/status");
+    CHECK("1" == s["jobs_stopped"] && "1" == s["jobs_failed"] && "0" == s["jobs_ok"]);
+    CHECK(0 == srv.rejectReports);   // the refused report really happened
+
+    Call("POST", "/command", "test_id=1&command=stop");
+    CHECK(WaitFor([]() { return Client(1)["state"] == "done"; }, 10000));
+    rt.join();
+    CHECK(HERD_END_CLEAN == end);
+}
+
 // A message over the coordinator's limit (MAX_STATUS_MESSAGE_BYTES) is cut (not inside a UTF-8 character): the reports are accepted
 // and the client still follows commands
 static void TestLongMessage()
@@ -910,6 +971,8 @@ int main()
             "no runner output (one waits and reports it, one ends with the pool exhausted)");
     RunTest("custom hooks: failing job, stopped job, failing identity setup", TestHerdClientFailures,
             "no runner output (failed and stopped jobs are reported, the client stays; only the identity setup ends it in error)");
+    RunTest("job result kept until the coordinator has it", TestResultNotLost,
+            "no runner output (a refused report, then the next job ends: both results are counted)");
     RunTest("program argument placeholders {NSHTEST_...}", TestArgTemplates,
             "no runner output (expansion, old names, literal text, unknown names and {NSHTEST_PASSWORD} refused)");
 #ifndef _WIN32

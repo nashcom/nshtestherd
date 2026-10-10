@@ -1,4 +1,9 @@
-/* dominoload.cpp - the operations domlem performs against a Domino server. Interface: dominoload.h */
+/* dominoload.cpp - the operations domlem performs against a Domino server. Interface: dominoload.h
+ *
+ * Open and close: no handle stays open between two operations. Each operation opens what it needs and releases it in
+ * the reverse order (notes before their database, the agent before its database, the database last with CloseDb). The
+ * directory is read and closed before a job opens the databases it works in.
+ */
 
 #include <stdio.h>
 #include <string.h>
@@ -17,7 +22,7 @@
 #include "dominoload.h"
 
 
-DominoLoad::DominoLoad() : m_bInit (FALSE), m_hDb (NULLHANDLE), m_dwAgentTimeLimit (0), m_bRandomLoaded (FALSE), m_dwDbOpens (0), m_dwAgentRuns (0), m_dwMailsSent (0)
+DominoLoad::DominoLoad() : m_bInit (FALSE), m_dwAgentTimeLimit (0), m_bRandomLoaded (FALSE), m_bMailPrepared (FALSE), m_dwDbOpens (0), m_dwAgentRuns (0), m_dwMailsSent (0)
 {
     m_szFullPath[0] = '\0';
 }
@@ -57,9 +62,10 @@ STATUS DominoLoad::Init (const char *pszServer, const char *pszDbFile, std::stri
 
     Term();
 
-    m_Server    = pszServer ? pszServer : "";
-    m_DbFile    = pszDbFile ? pszDbFile : "";
+    m_Server = pszServer ? pszServer : "";
+    m_DbFile = pszDbFile ? pszDbFile : "";
 
+    /* Only the path: the database is opened by every operation that needs it */
     if (!m_DbFile.empty())
     {
         error = OSPathNetConstruct (NULL, NullIfEmpty ((char *) pszServer), pszDbFile, m_szFullPath);
@@ -68,15 +74,6 @@ STATUS DominoLoad::Init (const char *pszServer, const char *pszDbFile, std::stri
         {
             Err = std::string ("Cannot construct path for ") + pszDbFile + ": " + ErrorText (error);
             m_szFullPath[0] = '\0';
-            goto Done;
-        }
-
-        error = NSFDbOpen (m_szFullPath, &m_hDb);
-
-        if (error)
-        {
-            Err = std::string ("Cannot open database ") + m_szFullPath + ": " + ErrorText (error);
-            m_hDb = NULLHANDLE;
             goto Done;
         }
     }
@@ -99,7 +96,6 @@ STATUS DominoLoad::Init (const char *pszServer, const char *pszDbFile, std::stri
 
 Done:
 
-    /* Nothing stays open after an error */
     if (error)
         Term();
 
@@ -107,44 +103,65 @@ Done:
 }
 
 
-std::string DominoLoad::GetDbLogicalPath() const
+void DominoLoad::Term()
 {
+    /* No handle is kept between operations: only the state of the job goes */
+    m_bInit         = FALSE;
+    m_bMailPrepared = FALSE;
+    m_bRandomLoaded = FALSE;
+    m_RandomNames.clear();
+    m_szFullPath[0] = '\0';
+}
+
+
+std::string DominoLoad::GetDbLogicalPath (std::string &Err) const
+{
+    STATUS      error = NOERROR;
+    DBHANDLE    hDb   = NULLHANDLE;
     std::string Path;
     char        szCanonical[MAXPORTNAME+MAXUSERNAME+MAXPATH+8] = {0};
     char        szFile[MAXPATH+1] = {0};
 
-    if (NULLHANDLE == m_hDb)
+    if ('\0' == m_szFullPath[0])
+    {
+        Err = "No database for this job";
         goto Done;
+    }
 
-    /* The canonical path of the open database, then only its file part: port and server are cut off by the API, the
+    error = NSFDbOpen (m_szFullPath, &hDb);
+
+    if (error)
+    {
+        Err = std::string ("Cannot open database ") + m_szFullPath + ": " + ErrorText (error);
+        hDb = NULLHANDLE;
+        goto Done;
+    }
+
+    /* The canonical path of the database, then only its file part: port and server are cut off by the API, the
      * separators between them are not ours to know */
-    if (NOERROR != NSFDbPathGet (m_hDb, szCanonical, NULL))
-        goto Done;
+    error = NSFDbPathGet (hDb, szCanonical, NULL);
 
-    if (NOERROR != OSPathNetParse (szCanonical, NULL, NULL, szFile))
+    if (error)
+    {
+        Err = std::string ("Cannot get the path of ") + m_szFullPath + ": " + ErrorText (error);
         goto Done;
+    }
+
+    error = OSPathNetParse (szCanonical, NULL, NULL, szFile);
+
+    if (error)
+    {
+        Err = std::string ("Cannot parse the path ") + szCanonical + ": " + ErrorText (error);
+        goto Done;
+    }
 
     Path = szFile;
 
 Done:
 
+    CloseDb (&hDb);
+
     return Path;
-}
-
-
-void DominoLoad::Term()
-{
-    m_Agent.Close();            /* the agent uses the database handle: first */
-    m_Mail.Close();
-    m_bInit = FALSE;
-    m_RandomNames.clear();
-    m_bRandomLoaded = FALSE;
-
-    if (m_hDb)
-    {
-        NSFDbClose (m_hDb);
-        m_hDb = NULLHANDLE;
-    }
 }
 
 
@@ -165,14 +182,14 @@ STATUS DominoLoad::OpDbOpen (std::string &Message)
         goto Done;
     }
 
-    if (NULLHANDLE == m_hDb)
+    if ('\0' == m_szFullPath[0])
     {
         Message = "No database for this job";
         error   = ERR_MISC_INVALID_ARGS;
         goto Done;
     }
 
-    /* A new connection every time: the open of the owned handle would not exercise the connect */
+    /* A new connection every time: open, read the access level, close */
     error = NSFDbOpenExtended (m_szFullPath, 0, NULLHANDLE, NULL, &hDb, &DataModified, &NonDataModified);
 
     if (error)
@@ -186,14 +203,13 @@ STATUS DominoLoad::OpDbOpen (std::string &Message)
 
     m_dwDbOpens++;
 
-    snprintf (szMessage, sizeof (szMessage), "dbopen #%lu %s access level %d", (unsigned long) m_dwDbOpens, m_DbFile.c_str(), (int) wAccessLevel);
+    snprintf (szMessage, sizeof (szMessage), "dbopen #%lu %s access level %d%s", (unsigned long) m_dwDbOpens, m_DbFile.c_str(), (int) wAccessLevel,
+              g_bCloseSession ? ", session closed" : "");
     Message = szMessage;
 
 Done:
 
-    /* NSFDbCloseSession closes the database handle itself: no NSFDbClose for it */
-    if (hDb)
-        NSFDbCloseSession (hDb);
+    CloseDb (&hDb);
 
     return error;
 }
@@ -201,8 +217,9 @@ Done:
 
 STATUS DominoLoad::OpRunAgent (std::string &Message)
 {
-    STATUS error = NOERROR;
-    char   szMessage[MAXPATH+MAXUSERNAME+64] = {0};
+    STATUS      error = NOERROR;
+    AgentRunner Agent;
+    char        szMessage[MAXPATH+MAXUSERNAME+64] = {0};
 
     if (!IsInit())
     {
@@ -211,24 +228,22 @@ STATUS DominoLoad::OpRunAgent (std::string &Message)
         goto Done;
     }
 
-    if (NULLHANDLE == m_hDb)
+    if ('\0' == m_szFullPath[0])
     {
         Message = "No database for this job";
         error   = ERR_MISC_INVALID_ARGS;
         goto Done;
     }
 
-    if (!m_Agent.IsOpen())
-    {
-        m_Agent.SetTimeLimit (m_dwAgentTimeLimit);
+    /* Database and agent for this run only */
+    Agent.SetTimeLimit (m_dwAgentTimeLimit);
 
-        error = m_Agent.Open (m_hDb, m_AgentName.c_str(), Message);
+    error = Agent.Open (m_szFullPath, m_AgentName.c_str(), Message);
 
-        if (error)
-            goto Done;
-    }
+    if (error)
+        goto Done;
 
-    error = m_Agent.Run (Message);
+    error = Agent.Run (Message);
 
     if (error)
         goto Done;
@@ -240,12 +255,16 @@ STATUS DominoLoad::OpRunAgent (std::string &Message)
 
 Done:
 
+    /* The agent, then its database */
+    Agent.Close();
+
     return error;
 }
 
 
 /* The people random recipients are picked from: the full names of all documents of the directory that match the filter.
- * Done once with the first mail. A limit keeps the list in bounds for a very large directory. */
+ * Read once per job, with the first mail, before any database the job works in is opened. A limit keeps the list in
+ * bounds for a very large directory. */
 
 #define MAX_RANDOM_NAMES   20000
 
@@ -326,28 +345,30 @@ STATUS DominoLoad::LoadRandomRecipients (std::string &Err)
 
 Done:
 
+    /* The note, the ID table, then the directory */
     if (hNote)
         NSFNoteClose (hNote);
 
     if (hTable)
         IDDestroyTable (hTable);
 
-    if (hDir)
-        NSFDbClose (hDir);
+    CloseDb (&hDir);
 
     return error;
 }
 
 
-/* The sender's mail file from the directory, opened for the sent copies. SENTCOPY_AUTO without a mail file in the
- * directory is not an error: then there are no sent copies (logged once per job). */
+/* The sender's mail file for the sent copies, from the person document (a lookup, no database is opened). SENTCOPY_AUTO
+ * without a mail file in the directory is not an error: then there are no sent copies (logged once per job). */
 
-STATUS DominoLoad::OpenSentCopy (std::string &Err)
+STATUS DominoLoad::FindSentCopyPath (std::string &Err)
 {
     STATUS error = NOERROR;
     char   szMailServer[MAXUSERNAME+1] = {0};
     char   szMailFile[MAXPATH+1]       = {0};
     char   szPath[MAXPATH+1]           = {0};
+
+    m_Mail.SetSentCopyPath (NULL);
 
     if (!LookupMailFile (NullIfEmpty ((char *) m_Server.c_str()), m_UserName.c_str(), szMailServer, (WORD) sizeof (szMailServer), szMailFile, (WORD) sizeof (szMailFile)))
     {
@@ -371,7 +392,51 @@ STATUS DominoLoad::OpenSentCopy (std::string &Err)
         goto Done;
     }
 
-    error = m_Mail.OpenSentCopy (szPath, Err);
+    m_Mail.SetSentCopyPath (szPath);
+
+Done:
+
+    return error;
+}
+
+
+/* Once per job, before the first mail: everything read from the directory first (the recipient list, with the directory
+ * closed again; the sender's mail file by a lookup), then the settings and the paths of the mail client. Opens nothing
+ * that stays open. */
+
+STATUS DominoLoad::PrepareMail (std::string &Err)
+{
+    STATUS error = NOERROR;
+
+    if (m_MailSettings.RandomCount.dwMax && !m_bRandomLoaded)
+    {
+        error = LoadRandomRecipients (Err);
+
+        if (error)
+            goto Done;
+    }
+
+    m_Mail.SetBodySize (ValueRange (m_MailSettings.BodyKB.dwMin * 1024, m_MailSettings.BodyKB.dwMax * 1024));
+    m_Mail.SetBodyStyle (m_MailSettings.BodyStyle);
+    m_Mail.SetAttachments (m_MailSettings.AttachCount, ValueRange (m_MailSettings.AttachKB.dwMin * 1024, m_MailSettings.AttachKB.dwMax * 1024), m_MailSettings.bAttachBinary);
+    m_Mail.SetAttachmentTag (m_TestId.empty() ? "" : ("t" + m_TestId).c_str());
+
+    error = m_Mail.SetServer (m_Server.c_str(), Err);
+
+    if (error)
+        goto Done;
+
+    m_Mail.SetSentCopyPath (NULL);
+
+    if ((SENTCOPY_AUTO == m_MailSettings.SentCopy) || (SENTCOPY_ON == m_MailSettings.SentCopy))
+    {
+        error = FindSentCopyPath (Err);
+
+        if (error)
+            goto Done;
+    }
+
+    m_bMailPrepared = TRUE;
 
 Done:
 
@@ -398,44 +463,20 @@ STATUS DominoLoad::OpSendMail (std::string &Message)
         goto Done;
     }
 
-    if (!m_Mail.IsOpen())
+    if (!m_bMailPrepared)
     {
-        m_Mail.SetBodySize (ValueRange (m_MailSettings.BodyKB.dwMin * 1024, m_MailSettings.BodyKB.dwMax * 1024));
-        m_Mail.SetBodyStyle (m_MailSettings.BodyStyle);
-        m_Mail.SetAttachments (m_MailSettings.AttachCount, ValueRange (m_MailSettings.AttachKB.dwMin * 1024, m_MailSettings.AttachKB.dwMax * 1024), m_MailSettings.bAttachBinary);
-        m_Mail.SetAttachmentTag (m_TestId.empty() ? "" : ("t" + m_TestId).c_str());
-
-        error = m_Mail.Open (m_Server.c_str(), Message);
+        error = PrepareMail (Message);
 
         if (error)
             goto Done;
-
-        if ((SENTCOPY_AUTO == m_MailSettings.SentCopy) || (SENTCOPY_ON == m_MailSettings.SentCopy))
-        {
-            error = OpenSentCopy (Message);
-
-            if (error)
-            {
-                m_Mail.Close();      /* the next attempt starts over */
-                goto Done;
-            }
-        }
     }
 
     /* -mailto is a list; random recipients are added; without both the mail goes to the sender */
     Recipients = SplitList (m_MailTo.c_str(), ',');
     dwRandom   = PickInRange (m_MailSettings.RandomCount, (unsigned long) dwNumber * 7UL + 3);
 
-    if (dwRandom)
+    if (dwRandom && !m_RandomNames.empty())
     {
-        if (!m_bRandomLoaded)
-        {
-            error = LoadRandomRecipients (Message);
-
-            if (error)
-                goto Done;
-        }
-
         for (DWORD dwPick = 0; dwPick < dwRandom; dwPick++)
             Recipients.push_back (m_RandomNames[Random() % m_RandomNames.size()]);
     }
@@ -461,6 +502,7 @@ STATUS DominoLoad::OpSendMail (std::string &Message)
               m_ShortName.empty() ? "" : " ", m_ShortName.c_str(), (unsigned long) dwNumber);
     Subject += szTag;
 
+    /* Opens the sent copy's mail file and the mail.box for their note each, and closes them again */
     error = m_Mail.Send (m_UserName.c_str(), Subject.c_str(), Message);
 
     if (error)

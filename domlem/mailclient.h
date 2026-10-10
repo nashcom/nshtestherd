@@ -1,18 +1,19 @@
 /* mailclient.h - a mail client for load tests (implemented in mailclient.cpp)
  *
  * MailClient crafts a complete mail note (Form, From, SendTo, Recipients, Subject, PostedDate, rich text Body) and
- * writes it straight into the mail.box of a Domino server, optionally with a sent copy in the sender's mail file. The router picks it up from there, so a message exercises
- * the whole mail path. The mail.box is opened on the server (a remote open): a server with several mail boxes
- * (mail1.box ... mailN.box) hands out one of them for every open of "mail.box".
+ * writes it straight into the mail.box of a Domino server, optionally with a sent copy in the sender's mail file. The
+ * router picks it up from there, so a message exercises the whole mail path. The mail.box is opened on the server (a
+ * remote open): a server with several mail boxes (mail1.box ... mailN.box) hands out one of them for every open.
  *
- * Further mail operations (reading, deleting) are added here later. Owns the mail.box handle: Close() or the
- * destructor release it. The handle has the identity the process has when Open() runs.
+ * Holds no handle between two messages: Send() opens each database for its note, closes the note and then the database
+ * (CloseDb). Every message therefore opens mail.box anew, as a client does. The databases are opened with the identity
+ * the process has at that moment. Further mail operations (reading, deleting) are added here later.
  *
  *   MailClient Mail;
  *   std::string Err;
  *
  *   Mail.SetBodySize (ValueRange (4096, 8192));       // bytes, a value in the range for every mail
- *   Mail.Open ("server", Err);
+ *   Mail.SetServer ("server", Err);
  *   Mail.AddSendTo ("CN=Recipient/O=Org");
  *   Mail.AddSendTo ("CN=Another/O=Org");
  *   Mail.Send ("CN=Sender/O=Org", "Subject", Err);
@@ -45,19 +46,16 @@ public:
     void SetAttachments (const ValueRange &Count, const ValueRange &Bytes, BOOL bBinary);
     void SetAutoSubmitted (BOOL bAutoSubmitted);   /* add the Auto-submitted item (RFC 3834), default TRUE */
 
-    /* Opens the mail.box of the server (pszServer empty: local) and starts counting messages at 1 again, so the
-     * content of message N is the same in every job. On an error Err has the failing call with its error text. */
-    STATUS Open (const char *pszServer, std::string &Err);
+    /* The server whose mail.box gets the messages (pszServer empty: local). Starts counting messages at 1 again, so the
+     * content of message N is the same in every job. Opens nothing. On an error Err has the failing call. */
+    STATUS SetServer (const char *pszServer, std::string &Err);
 
-    /* Also saves a copy of every message in this database, the sender's mail file (like "save sent copy" in a Notes
-     * client). pszPath is server!!file. The copy is written before the message goes into the mail.box. */
-    STATUS OpenSentCopy (const char *pszPath, std::string &Err);
+    /* Also save a copy of every message in this database, the sender's mail file (like "save sent copy" in a Notes
+     * client). pszPath is a full path (server!!file); NULL or empty: no sent copies. The copy is written before the
+     * message goes into the mail.box. Opens nothing. */
+    void SetSentCopyPath (const char *pszPath);
 
-    /* Releases the mail.box and the sent copy database. Safe to call more than once. */
-    void Close();
-
-    BOOL IsOpen() const { return NULLHANDLE != m_hMailBox; }
-    BOOL HasSentCopy() const { return NULLHANDLE != m_hSentCopyDb; }
+    BOOL HasSentCopy() const { return !m_SentCopyPath.empty(); }
 
     /* Goes into the attachment names, to tell the workers apart: "attachment_<tag>_<message>_<n>.bin". Only letters,
      * digits, dot, dash and underscore; anything else is left out. */
@@ -70,8 +68,8 @@ public:
     void AddBlindCopyTo (const char *pszName);
     void ClearRecipients();
 
-    /* Crafts one message to the recipients added before and writes it into the mail.box. pszFrom is a Notes name or
-     * internet address. Err has the failing call with its error text when it fails. */
+    /* Crafts one message to the recipients added before: the sent copy (when there is a sent copy path), then the
+     * message in the mail.box. pszFrom is a Notes name or internet address. Err has the failing call when it fails. */
     STATUS Send (const char *pszFrom, const char *pszSubject, std::string &Err);
 
     DWORD GetSent() const { return m_dwSent; }
@@ -83,9 +81,10 @@ public:
 
 private:
 
-    MailClient (const MailClient &);                /* not copyable: owns a Notes handle */
+    MailClient (const MailClient &);                /* not copyable */
     MailClient &operator= (const MailClient &);
 
+    STATUS WriteMessage (const char *pszPath, const char *pszWhat, const char *pszFrom, const char *pszSubject, std::string &Err);
     STATUS BuildMessage (NOTEHANDLE hNote, const char *pszFrom, const char *pszSubject, std::string &Err);
     STATUS AddBody (NOTEHANDLE hNote, std::string &Err);
     STATUS AddAttachment (NOTEHANDLE hNote, DWORD dwIndex, std::string &Err);
@@ -94,8 +93,8 @@ private:
     std::vector<std::string> m_CopyTo;
     std::vector<std::string> m_BlindCopyTo;
 
-    DBHANDLE m_hMailBox;
-    DBHANDLE m_hSentCopyDb;     /* the sender's mail file for the sent copies, NULLHANDLE: none */
+    std::string m_MailBoxPath;  /* server!!mail.box, empty until SetServer() */
+    std::string m_SentCopyPath; /* the sender's mail file for the sent copies, empty: none */
     std::string m_AttachTag;
     ValueRange m_BodyBytes;
     TextGenerator m_BodyText;

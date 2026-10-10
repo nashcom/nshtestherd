@@ -154,7 +154,8 @@ private:
     bool             Apply();      // true when the client is finished (stop)
     void             Interrupted();
     void             SetState(const std::string &state, const std::string &message);
-    void             EndJob(const std::string &result, const std::string &message);   // reports the result, back to idle
+    void             EndJob(const std::string &result, const std::string &message);   // keeps the result for the next report, back to idle
+    void             DeliverLastJob();   // before a new result replaces it: gets the previous one to the coordinator (a few tries)
     void             StopJob(bool reportNow);   // aborts a job that is still there (running or paused): "stopped"
     void             Say(const std::string &text) { hooks_.Log(account_.testId, text); }
 
@@ -181,4 +182,5 @@ private:
     long long   lastJobId_ = 0;
     std::string lastJob_;
     std::string lastJobResult_;
+    bool        lastJobReported_ = true;   // the coordinator accepted a report that carried it; a new result must not replace one that did not arrive
 };

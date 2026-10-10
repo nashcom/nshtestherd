@@ -20,14 +20,14 @@
 #define MAIL_BODY_CHUNK     16000         /* text handed to the rich text API in one piece */
 
 
-MailClient::MailClient() : m_hMailBox (NULLHANDLE), m_hSentCopyDb (NULLHANDLE), m_BodyBytes (1024), m_AttachCount (0), m_AttachBytes (0), m_dwLastBodyBytes (0), m_dwLastAttachCount (0), m_dwLastAttachBytes (0), m_bAttachBinary (TRUE), m_bAutoSubmitted (TRUE), m_dwSent (0)
+MailClient::MailClient() : m_BodyBytes (1024), m_AttachCount (0), m_AttachBytes (0), m_dwLastBodyBytes (0), m_dwLastAttachCount (0), m_dwLastAttachBytes (0), m_bAttachBinary (TRUE), m_bAutoSubmitted (TRUE), m_dwSent (0)
 {
 }
 
 
 MailClient::~MailClient()
 {
-    Close();
+    /* No handle is kept between messages: nothing to close */
 }
 
 
@@ -102,12 +102,12 @@ void MailClient::SetAttachmentTag (const char *pszTag)
 }
 
 
-STATUS MailClient::Open (const char *pszServer, std::string &Err)
+STATUS MailClient::SetServer (const char *pszServer, std::string &Err)
 {
     STATUS error = NOERROR;
     char   szPath[MAXPATH+1] = {0};
 
-    Close();
+    m_MailBoxPath.clear();
 
     error = OSPathNetConstruct (NULL, NullIfEmpty ((char *) pszServer), MAILBOX_NAME, szPath);
 
@@ -117,14 +117,7 @@ STATUS MailClient::Open (const char *pszServer, std::string &Err)
         goto Done;
     }
 
-    error = NSFDbOpen (szPath, &m_hMailBox);
-
-    if (error)
-    {
-        Err = std::string ("Cannot open ") + szPath + ": " + ErrorText (error);
-        m_hMailBox = NULLHANDLE;
-        goto Done;
-    }
+    m_MailBoxPath = szPath;
 
     /* Message numbers (and with them the content) start again with every job */
     m_dwSent = 0;
@@ -135,50 +128,58 @@ Done:
 }
 
 
-STATUS MailClient::OpenSentCopy (const char *pszPath, std::string &Err)
+void MailClient::SetSentCopyPath (const char *pszPath)
 {
-    STATUS error = NOERROR;
-
-    if (m_hSentCopyDb)
-    {
-        NSFDbClose (m_hSentCopyDb);
-        m_hSentCopyDb = NULLHANDLE;
-    }
-
-    if (IsNullStr (pszPath))
-    {
-        Err   = "No mail file for the sent copies";
-        error = ERR_MISC_INVALID_ARGS;
-        goto Done;
-    }
-
-    error = NSFDbOpen (pszPath, &m_hSentCopyDb);
-
-    if (error)
-    {
-        Err = std::string ("Cannot open the mail file ") + pszPath + " for the sent copies: " + ErrorText (error);
-        m_hSentCopyDb = NULLHANDLE;
-    }
-
-Done:
-
-    return error;
+    m_SentCopyPath = pszPath ? pszPath : "";
 }
 
 
-void MailClient::Close()
+/* One message into one database: open it, create the note, write the message, close the note, close the database.
+ * pszWhat names the database in messages ("the mail.box", "the sent copy"). */
+
+STATUS MailClient::WriteMessage (const char *pszPath, const char *pszWhat, const char *pszFrom, const char *pszSubject, std::string &Err)
 {
-    if (m_hMailBox)
+    STATUS     error = NOERROR;
+    DBHANDLE   hDb   = NULLHANDLE;
+    NOTEHANDLE hNote = NULLHANDLE;
+
+    error = NSFDbOpen (pszPath, &hDb);
+
+    if (error)
     {
-        NSFDbClose (m_hMailBox);
-        m_hMailBox = NULLHANDLE;
+        Err = std::string ("Cannot open ") + pszPath + " for " + pszWhat + ": " + ErrorText (error);
+        hDb = NULLHANDLE;
+        goto Done;
     }
 
-    if (m_hSentCopyDb)
+    error = NSFNoteCreate (hDb, &hNote);
+
+    if (error)
     {
-        NSFDbClose (m_hSentCopyDb);
-        m_hSentCopyDb = NULLHANDLE;
+        Err   = std::string ("NSFNoteCreate (") + pszWhat + ") failed: " + ErrorText (error);
+        hNote = NULLHANDLE;
+        goto Done;
     }
+
+    error = BuildMessage (hNote, pszFrom, pszSubject, Err);
+
+    if (error)
+        goto Done;
+
+    error = NSFNoteUpdate (hNote, 0);
+
+    if (error)
+        Err = std::string ("Cannot write ") + pszWhat + " into " + pszPath + ": " + ErrorText (error);
+
+Done:
+
+    /* The note before its database */
+    if (hNote)
+        NSFNoteClose (hNote);
+
+    CloseDb (&hDb);
+
+    return error;
 }
 
 
@@ -505,13 +506,11 @@ Done:
 
 STATUS MailClient::Send (const char *pszFrom, const char *pszSubject, std::string &Err)
 {
-    STATUS     error = NOERROR;
-    NOTEHANDLE hNote = NULLHANDLE;
-    NOTEHANDLE hCopy = NULLHANDLE;
+    STATUS error = NOERROR;
 
-    if (!IsOpen())
+    if (m_MailBoxPath.empty())
     {
-        Err   = "Mail box is not open";
+        Err   = "No mail.box (SetServer)";
         error = ERR_MISC_INVALID_ARGS;
         goto Done;
     }
@@ -523,64 +522,25 @@ STATUS MailClient::Send (const char *pszFrom, const char *pszSubject, std::strin
         goto Done;
     }
 
-    /* The sent copy: a note of its own in the sender's mail file, built from the same values. Not a copy of the mail.box
-     * note: once that is in the mail.box the router may take it away at any moment. */
-    if (m_hSentCopyDb)
+    /* The sent copy first: a note of its own in the sender's mail file, built from the same values (not a copy of the
+     * mail.box note: once that is in the mail.box the router may take it away at any moment). Each database is opened
+     * for its note and closed again before the next one is opened. */
+    if (!m_SentCopyPath.empty())
     {
-        error = NSFNoteCreate (m_hSentCopyDb, &hCopy);
-
-        if (error)
-        {
-            Err   = "NSFNoteCreate (sent copy) failed: " + ErrorText (error);
-            hCopy = NULLHANDLE;
-            goto Done;
-        }
-
-        error = BuildMessage (hCopy, pszFrom, pszSubject, Err);
+        error = WriteMessage (m_SentCopyPath.c_str(), "the sent copy", pszFrom, pszSubject, Err);
 
         if (error)
             goto Done;
-
-        error = NSFNoteUpdate (hCopy, 0);
-
-        if (error)
-        {
-            Err = "Cannot write the sent copy into the mail file: " + ErrorText (error);
-            goto Done;
-        }
     }
 
-    error = NSFNoteCreate (m_hMailBox, &hNote);
-
-    if (error)
-    {
-        Err   = "NSFNoteCreate failed: " + ErrorText (error);
-        hNote = NULLHANDLE;
-        goto Done;
-    }
-
-    error = BuildMessage (hNote, pszFrom, pszSubject, Err);
+    error = WriteMessage (m_MailBoxPath.c_str(), "the message", pszFrom, pszSubject, Err);
 
     if (error)
         goto Done;
-
-    error = NSFNoteUpdate (hNote, 0);
-
-    if (error)
-    {
-        Err = std::string ("Cannot write the message into ") + MAILBOX_NAME + ": " + ErrorText (error);
-        goto Done;
-    }
 
     m_dwSent++;
 
 Done:
-
-    if (hCopy)
-        NSFNoteClose (hCopy);
-
-    if (hNote)
-        NSFNoteClose (hNote);
 
     return error;
 }

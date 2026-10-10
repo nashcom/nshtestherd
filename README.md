@@ -745,6 +745,7 @@ nshtestherd is a test tool for a trusted network. Know what an open port means:
 ```bash
 make test                            # builds and runs test_core and test_runner
 tests/integration.sh ./nshtestherd   # HTTP layer with curl (default port 18788, set HERD_TEST_PORT)
+tests/testrun.sh                     # longer run, job results add up (60 s; tests/testrun.sh 600 for 10 minutes; port 18789)
 ```
 
 | Test             | What it covers                                                                         |
@@ -752,14 +753,21 @@ tests/integration.sh ./nshtestherd   # HTTP layer with curl (default port 18788,
 | `test_core`      | CSV, wire format, `--generate`, allocation, exhaustion, concurrency, commands, metrics |
 | `test_runner`    | Runner against an in-process coordinator: dummy clients, fill and cap, child programs  |
 | `integration.sh` | Real HTTP with curl: limits, methods, CSV, retry keys, metrics, shutdown               |
+| `testrun.sh`     | Coordinator and two runners under random commands: job results counted exactly once    |
+
+`testrun.sh` starts a coordinator and two runners with 5 clients each: one runs a small bash job (0-3 s, about one
+run in four fails), the other the built-in dummy job (it never ends by itself, so it ends as `stopped`). For the given
+time (default 60 seconds) it sends random `run`, `idle` and `pause` commands to all clients or to one, then stops
+them all. It checks that every client ended `done` and that the `ok`, `failed` and `stopped` counts in `/status`
+equal the job results in the runner logs, and that `/metrics` says the same. The logs are kept when a check fails.
 
 `test_runner` scenarios: dummy clients, fill mode and client cap, argument placeholders, a `/bin/sh` child with a failing job, a program that
-cannot be started, the self-child (`--child-info`), reply framing (truncated and chunked replies are rejected) and a
+cannot be started, a job result that survives a refused report, the self-child (`--child-info`), reply framing (truncated and chunked replies are rejected) and a
 child that ignores SIGTERM (killed and reaped). It uses `127.0.0.1:18790` (`HERD_TEST_PORT`) and is skipped if that
 port is busy.
 
-`test_core`, `test_runner` and `integration.sh` are not part of the product binary.
-All three use the standard section headers (a 90-character rule above and below the title). Each test prints one result
+`test_core`, `test_runner`, `integration.sh` and `testrun.sh` are not part of the product binary.
+All of them use the standard section headers (a 90-character rule above and below the title). Each test prints one result
 line, and the final summary line starts with `[ OK ]` or `[ FAIL ]` (a failing check also prints
 `[ FAIL ] file:line: condition`).
 `test_runner` shows what to expect under each test name, and the runner's own log lines appear in between. Two
@@ -782,7 +790,7 @@ src/httpclient.*  minimal HTTP client (runner only)
 src/process.*     direct program launch, no shell (runner only)
 src/main.cpp      command line, signals
 src/version.h     NSHTESTHERD_VERSION, the single source of the version
-tests/            test_core, test_runner, integration.sh
+tests/            test_core, test_runner, integration.sh, testrun.sh
 examples/         users.csv, worker.sh (Bash worker, no Domino calls)
 examples/k6/      k6 worker example: script, run.sh (hands-free end-to-end run), compose file, README
 domlem/           Domino add-in worker (Notes C API): client core + Notes hooks, user registration, makefile

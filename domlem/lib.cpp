@@ -35,6 +35,26 @@
 #include "lib.h"
 
 
+void CloseDb (DBHANDLE *phDb)
+{
+    if ((NULL == phDb) || (NULLHANDLE == *phDb))
+        goto Done;
+
+    /* NSFDbCloseSession always closes the handle, and the session too when no other database of the process is open on
+     * it. So it is the one close, never followed by NSFDbClose. */
+    if (g_bCloseSession)
+        NSFDbCloseSession (*phDb);
+    else
+        NSFDbClose (*phDb);
+
+    *phDb = NULLHANDLE;
+
+Done:
+
+    return;
+}
+
+
 BOOL IsNullStr (const char *pszStr)
 {
     if (NULL == pszStr)

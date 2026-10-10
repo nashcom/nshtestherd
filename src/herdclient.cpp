@@ -164,6 +164,10 @@ bool HerdClient::Report()
         return false;
     }
 
+    // Accepted: the coordinator has counted the last job that went with this report
+    if (lastJobId_ > 0)
+        lastJobReported_ = true;
+
     // A 200 without the instruction fields is a damaged reply: do not act on defaults
     if (!f.count("command_id") || !f.count("command") || !f.count("job") || !f.count("pause_seconds") || !IsNumber(f["command_id"]) || !IsNumber(f["pause_seconds"]))
     {
@@ -205,13 +209,32 @@ void HerdClient::SetState(const std::string &state, const std::string &message)
         hooks_.StateChanged(state_, message_);
 }
 
+// Only one result goes with a report. A result that the coordinator has not accepted yet would be lost when the next
+// job ends before the next successful report (for example "stopped" by a new run command that then fails to start).
+void HerdClient::DeliverLastJob()
+{
+    for (int attempt = 0; attempt < 3 && !lastJobReported_ && !lost_; attempt++)
+    {
+        if (attempt > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        Report();
+    }
+
+    if (!lastJobReported_)
+        Say("result of job " + lastJob_ + " (" + lastJobResult_ + ") not delivered: coordinator unreachable");
+}
+
 void HerdClient::EndJob(const std::string &result, const std::string &message)
 {
-    jobActive_     = false;
-    lastJobId_     = jobId_;
-    lastJob_       = job_;
-    lastJobResult_ = result;
-    resumeState_   = "idle";
+    DeliverLastJob();
+
+    jobActive_       = false;
+    lastJobId_       = jobId_;
+    lastJob_         = job_;
+    lastJobResult_   = result;
+    lastJobReported_ = false;
+    resumeState_     = "idle";
 
     SetState("idle", message);
     Say("job " + job_ + " " + result + (message.empty() ? "" : ": " + message));

@@ -358,6 +358,7 @@ The identity is set once, before the first command (with `-switch` the account's
 | `-server <name>`        | this server             | Domino server to work against (databases, ID vault, mail.box) |
 | `-switch`               | `DOMLEM_SWITCH`, else the coordinator's worker options, else off | Work as the account's own user (see the two identity modes); `switch=0` turns it off |
 | `-dbopen <path>`        | `names.nsf`             | Database the `dbopen` job opens (read only)                   |
+| `-closesession <0\|1>`  | `1`                     | Every database is closed with `NSFDbCloseSession` (the session goes with it, the next open connects anew) or `NSFDbClose` (see "How it works") |
 | `-db <path>`            | `nshtestherd.nsf`       | Test database with the agents of the `agent` job (never a system database) |
 | `-agent <name>`         | `TestAgent`             | Agent of `-db` run by the `agent` job (`agent:<name>` overrides) |
 | `-agenttimeout <sec>`   | `600`                   | Execution limit of one agent run in seconds, 0: none          |
@@ -401,7 +402,7 @@ curl -X POST -d 'target=all&command=run&job=agent:mailread' --data-urlencode 'pa
 ```
 
 A job may only change **what** it does, never **where** it works or **whom** it reaches. Accepted: `agenttimeout`,
-`mailrandom`, `mailsize`, `mailtext`, `mailattach`, `mailattachsize`, `mailattachtype`, `mailsubject` and `mailsentcopy`.
+`mailrandom`, `mailsize`, `mailtext`, `mailattach`, `mailattachsize`, `mailattachtype`, `mailsubject`, `mailsentcopy` and `closesession`.
 The database (`-db`), the agent (`-agent`; `agent:<name>` picks another agent of `-db`), the recipients (`-mailto`), the
 people filter (`-mailfilter`, `-mailnab`), the identity, the server, the coordinator and the certifier stay what the
 command line says, so a command over the network cannot point a lemming at other databases or other people. A refused
@@ -452,8 +453,18 @@ documents.
   `failed` with the reason, the handles are closed, and the worker is `idle` again. An unknown job name or invalid job
   parameters fail the same way. `error` (which ends the task) is left for a worker that cannot work at all: the
   identity setup failed. The result of the last step is shown by the coordinator: `curl "$H/client?test_id=N"`.
-- The Notes handles are opened when the job starts, with the identity the process has then: with `-switch` after the
-  switch. `dbopen` opens a new connection in every step; the agent and the mail box stay open for the whole job.
+- No database stays open between two operations, as a user closes a database when done with it. Every operation opens
+  what it needs and releases it in the reverse order: notes before their database, the agent before its database, the
+  database last, with its session when `-closesession` is on (the default). So every step connects anew:
+
+  | Job               | Once per job (read, closed again)                       | Every operation                                                          |
+  | ----------------- | ------------------------------------------------------- | ------------------------------------------------------------------------ |
+  | `dbopen`          | -                                                       | open `-dbopen`, read the access level, close                             |
+  | `agent`           | logical name of `-db` (open, name, close)               | open `-db`, open the agent, run it, close the agent, close `-db`         |
+  | `mail`, `mailtest`| recipient list from the directory; sender's mail file (lookup) | sent copy: open the mail file, write the note, close note and file; then the same with `mail.box` |
+
+  The directory is read and closed before a job opens the databases it works in. All operations run with the identity
+  the process has: with `-switch` after the switch.
 
 | File                             | Purpose                                                                          |
 | -------------------------------- | -------------------------------------------------------------------------------- |

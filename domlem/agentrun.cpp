@@ -14,7 +14,7 @@
 #include "agentrun.h"
 
 
-AgentRunner::AgentRunner() : m_dwTimeLimit (0), m_bOwnsDb (FALSE), m_hDb (NULLHANDLE), m_hAgent (NULL)
+AgentRunner::AgentRunner() : m_dwTimeLimit (0), m_hDb (NULLHANDLE), m_hAgent (NULL)
 {
 }
 
@@ -52,35 +52,6 @@ STATUS AgentRunner::Open (const char *pszDbPath, const char *pszAgentName, std::
         m_hDb = NULLHANDLE;
         goto Done;
     }
-
-    m_bOwnsDb = TRUE;
-
-    error = OpenAgent (pszAgentName, Err);
-
-Done:
-
-    if (error)
-        Close();
-
-    return error;
-}
-
-
-STATUS AgentRunner::Open (DBHANDLE hDb, const char *pszAgentName, std::string &Err)
-{
-    STATUS error = NOERROR;
-
-    Close();
-
-    if ((NULLHANDLE == hDb) || IsNullStr (pszAgentName))
-    {
-        Err   = "No database or agent name";
-        error = ERR_MISC_INVALID_ARGS;
-        goto Done;
-    }
-
-    m_hDb     = hDb;
-    m_bOwnsDb = FALSE;
 
     error = OpenAgent (pszAgentName, Err);
 
@@ -188,9 +159,6 @@ void AgentRunner::Close()
         m_hAgent = NULL;
     }
 
-    if (m_hDb && m_bOwnsDb)
-        NSFDbClose (m_hDb);
-
-    m_hDb     = NULLHANDLE;
-    m_bOwnsDb = FALSE;
+    /* The agent (closed above) before its database */
+    CloseDb (&m_hDb);
 }

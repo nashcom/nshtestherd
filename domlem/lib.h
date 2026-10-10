@@ -37,6 +37,14 @@
 /* Prefix of every log line, defined in domlem.cpp, used by all modules */
 extern char g_szLogPrefix[255];
 
+/* -closesession: every database is closed with NSFDbCloseSession (TRUE) or NSFDbClose (FALSE). Defined in domlem.cpp. */
+extern BOOL g_bCloseSession;
+
+/* The one way domlem closes a database: NSFDbCloseSession when -closesession is on (it always closes the handle, and
+ * the session when no other database of the process is open on it), else NSFDbClose. Sets *phDb to NULLHANDLE; does
+ * nothing for NULL or NULLHANDLE. Close notes and other objects of the database before. */
+void CloseDb (DBHANDLE *phDb);
+
 /* TRUE for NULL and for an empty string */
 BOOL IsNullStr (const char *pszStr);
 

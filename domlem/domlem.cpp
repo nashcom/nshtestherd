@@ -64,6 +64,7 @@ char g_szServer[MAXUSERNAME+1] = {0};                        /* -server: Domino 
 char g_szCoordinatorURL[256]   = "http://127.0.0.1:8788";    /* -coordinator: nshtestherd */
 char g_szDbFilePath[MAXPATH+1] = "nshtestherd.nsf";          /* -db: the test database with the agents of the agent job */
 char g_szOpenDbFilePath[MAXPATH+1] = "names.nsf";            /* -dbopen: database the dbopen job opens (read only: open, access level, close) */
+BOOL g_bCloseSession           = TRUE;                       /* -closesession: every database is closed with NSFDbCloseSession (1) or NSFDbClose (0), see CloseDb() */
 char g_szAgentName[MAXUSERNAME+1] = "TestAgent";                  /* -agent: agent run by the agent job (in the -db database) */
 DWORD g_dwAgentTimeout        = 600;                         /* -agenttimeout: seconds per agent run (10 minutes), 0: no limit */
 char g_szMailTo[1024]            = {0};                         /* -mailto: recipients of the mail job (comma separated), default: the current user (mail to self) */
@@ -402,20 +403,29 @@ Done:
         m_Load.SetMail (g_szMailTo, Mail);
         m_Load.SetWorker (Context.account.testId.c_str(), Context.account.shortName.c_str());
 
-        /* Each job opens only its own database: dbopen -dbopen (read only), agent -db, the mail jobs none */
+        /* Each job only its own database: dbopen -dbopen, the agent job -db, the mail jobs none. Init opens nothing: every
+         * operation opens what it needs and closes it again. */
         if (m_Load.Init (g_szServer, (JOB_MAIL == m_Job) ? "" : ((JOB_DBOPEN == m_Job) ? g_szOpenDbFilePath : g_szDbFilePath), Err))
             goto Done;
 
         /* An agent may write anywhere in its database: never in the directory or another system database. Checked with
-         * the Domino logical name of the database that was opened, so no physical path, link or other spelling of a
-         * system database gets through. Opening it did nothing; the handles are closed again in Done. */
+         * the Domino logical name of the database (opened for that and closed again), so no physical path, link or other
+         * spelling of a system database gets through. */
         if (JOB_AGENT == m_Job)
         {
-            LogicalPath = m_Load.GetDbLogicalPath();
+            std::string NameErr;
 
-            if (LogicalPath.empty() || IsSystemDatabase (LogicalPath.c_str()))
+            LogicalPath = m_Load.GetDbLogicalPath (NameErr);
+
+            if (LogicalPath.empty())
             {
-                Err = "The agent job does not run agents of the system database [" + (LogicalPath.empty() ? std::string (g_szDbFilePath) : LogicalPath) + "]: use a test database (-db)";
+                Err = NameErr;
+                goto Done;
+            }
+
+            if (IsSystemDatabase (LogicalPath.c_str()))
+            {
+                Err = "The agent job does not run agents of the system database [" + LogicalPath + "]: use a test database (-db)";
                 goto Done;
             }
         }
@@ -626,6 +636,7 @@ void Usage()
     AddInLogMessageText ("%s:   -server       Domino server to work against (default: this server)", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s:   -switch       use the identity of the allocated account: register user if needed, ID from vault, switch (default: DOMLEM_SWITCH, else off; switch=0 turns it off)", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s:   -dbopen       database the dbopen job opens, read only (default %s)", NOERROR, g_szLogPrefix, g_szOpenDbFilePath);
+    AddInLogMessageText ("%s:   -closesession every database is closed with NSFDbCloseSession (1, default) or NSFDbClose (0)", NOERROR, g_szLogPrefix);
     AddInLogMessageText ("%s:   -db           test database with the agents of the agent job, never a system database (default %s)", NOERROR, g_szLogPrefix, g_szDbFilePath);
     AddInLogMessageText ("%s:   -agent        agent run by the agent job, in the -db database (default %s)", NOERROR, g_szLogPrefix, g_szAgentName);
     AddInLogMessageText ("%s:   -agenttimeout execution limit of one agent run in seconds (default %lu, 0: no limit)", NOERROR, g_szLogPrefix, (unsigned long) g_dwAgentTimeout);
@@ -677,7 +688,7 @@ static BOOL IsFlagOption (const char *pszName)
 static BOOL IsJobOption (const char *pszName)
 {
     static const char *Names[] = { "agenttimeout", "mailrandom", "mailsize", "mailtext", "mailattach", "mailattachsize",
-                                   "mailattachtype", "mailsubject", "mailsentcopy" };
+                                   "mailattachtype", "mailsubject", "mailsentcopy", "closesession" };
 
     for (size_t nName = 0; nName < sizeof (Names) / sizeof (Names[0]); nName++)
     {
@@ -740,6 +751,13 @@ static STATUS ApplyOption (const OptionPair &Option, OptionScope Scope, std::str
         bOK = SetText (g_szDbFilePath, sizeof (g_szDbFilePath), Value);
     else if (0 == StrICmp (pszName, "dbopen"))
         bOK = SetText (g_szOpenDbFilePath, sizeof (g_szOpenDbFilePath), Value);
+    else if (0 == StrICmp (pszName, "closesession"))
+    {
+        bOK = bValue && ((Value == "1") || (Value == "0") || (0 == StrICmp (Value.c_str(), "yes")) || (0 == StrICmp (Value.c_str(), "no")));
+
+        if (bOK)
+            g_bCloseSession = (Value == "1") || (0 == StrICmp (Value.c_str(), "yes"));
+    }
     else if (0 == StrICmp (pszName, "agent"))
         bOK = SetText (g_szAgentName, sizeof (g_szAgentName), Value);
     else if (0 == StrICmp (pszName, "agenttimeout"))
@@ -853,6 +871,7 @@ struct JobDefaults
     DWORD        dwAgentTimeout;
     char         szMailTo[1024];
     MailSettings Mail;
+    BOOL         bCloseSession;
 };
 
 static JobDefaults g_JobDefaults;
@@ -866,6 +885,7 @@ static void SaveJobDefaults()
     memcpy (g_JobDefaults.szMailTo, g_szMailTo, sizeof (g_szMailTo));
     g_JobDefaults.dwAgentTimeout = g_dwAgentTimeout;
     g_JobDefaults.Mail           = g_MailSettings;
+    g_JobDefaults.bCloseSession  = g_bCloseSession;
     g_bJobDefaultsSaved          = TRUE;
 }
 
@@ -885,6 +905,7 @@ static STATUS ApplyJobParams (const std::string &Params, std::string &Err)
         memcpy (g_szMailTo, g_JobDefaults.szMailTo, sizeof (g_szMailTo));
         g_dwAgentTimeout = g_JobDefaults.dwAgentTimeout;
         g_MailSettings   = g_JobDefaults.Mail;
+        g_bCloseSession  = g_JobDefaults.bCloseSession;
     }
 
     for (size_t nOption = 0; nOption < Options.size(); nOption++)
