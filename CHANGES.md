@@ -3,6 +3,12 @@
 Newest version first. Every change is noted here with the change itself; `push-release.sh` refuses to tag a version
 that has no section here, and prints the section as the text for the GitHub release.
 
+## 0.9.2
+
+**Align command-line parameters: switch to single dash**
+
+To align with other projects the parameters are changed to a single dash
+
 ## 0.9.1
 
 **One dash for the options.** All options are written with a single dash: `-bind`, `-port`, `-csv`, `-generate`, `-runner`, `-server`,
