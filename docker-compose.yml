@@ -20,8 +20,8 @@
 #   NSHTEST_TOKEN    shared token: every call but /health needs "Authorization: Bearer <token>"
 #                    (default: none; set it whenever the port is reachable from other machines)
 #
-# Accounts: this file uses --generate. To use your own users instead, replace the
-# "--generate" line in the herd command with the two lines marked "own accounts"
+# Accounts: this file uses -generate. To use your own users instead, replace the
+# "-generate" line in the herd command with the two lines marked "own accounts"
 # and mount the CSV (see the volumes section).
 #
 # A restarted herd starts a fresh herd (client numbering from 1, all accounts free)
@@ -38,14 +38,14 @@ services:
     restart: always
 
     command:
-      - "--bind"
+      - "-bind"
       - "0.0.0.0"
-      - "--port"
+      - "-port"
       - "${HERD_PORT:-8788}"
-      - "--generate"
+      - "-generate"
       - "${HERD_USERS:-100}"
       # own accounts:
-      # - "--csv"
+      # - "-csv"
       # - "/users.csv"
 
     environment:
@@ -78,13 +78,13 @@ services:
       NSHTEST_TOKEN: "${NSHTEST_TOKEN:-}"
 
     command:
-      - "--runner"
-      - "--server"
+      - "-runner"
+      - "-server"
       - "http://herd:${HERD_PORT:-8788}"
-      - "--clients"
+      - "-clients"
       - "${RUNNER_CLIENTS:-10}"
       # smoke test: run nshtestherd itself as the child program (prints its pid)
-      # - "--program"
+      # - "-program"
       # - "/nshtestherd"
       # - "--"
-      # - "--child-info"
+      # - "-child-info"

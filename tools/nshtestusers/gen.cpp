@@ -262,7 +262,7 @@ bool WriteUsersFile(const std::string &path, const std::string &text, bool overw
 
     if (NULL == f)
     {
-        err = overwrite ? "cannot write " + path : "cannot create " + path + " (does it exist? --force replaces it)";
+        err = overwrite ? "cannot write " + path : "cannot create " + path + " (does it exist? -force replaces it)";
         return false;
     }
 

@@ -136,7 +136,7 @@ public:
     // Non-empty requestKey makes the call idempotent. isNew tells 201 from 200.
     Result Register(const std::string &requestKey, bool &isNew, ClientView &out);
 
-    // Worker options (--worker-options): one opaque string for every worker, returned with each registration. The
+    // Worker options (-worker-options): one opaque string for every worker, returned with each registration. The
     // coordinator does not interpret it; a worker takes what it knows (domlem: "switch") and ignores the rest.
     void        SetWorkerOptions(const std::string &options);
     std::string WorkerOptions();

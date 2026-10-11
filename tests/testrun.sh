@@ -92,18 +92,18 @@ WORK="$(mktemp -d)"
 
 header "Start coordinator on port $PORT and two runners ($CLIENTS clients), logs in $WORK"
 
-"$BIN" --port "$PORT" --generate 20 --timeout 3 > "$WORK/server.log" 2>&1 &
+"$BIN" -port "$PORT" -generate 20 -timeout 3 > "$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 trap 'kill $SERVER_PID $PROGRAM_PID $DUMMY_PID 2>/dev/null' EXIT
 sleep 1
 
 check "health" "ok" "$(curl -s "$BASE/health" | grep '^status=' | cut -d= -f2)"
 
-"$BIN" --runner --server "$BASE" --clients "$CLIENTS_PER_RUNNER" --poll-seconds 1 \
-  --program /bin/bash -- -c 'sleep $((RANDOM % 4)); [ $((RANDOM % 4)) -ne 0 ]' > "$WORK/runner_program.log" 2>&1 &
+"$BIN" -runner -server "$BASE" -clients "$CLIENTS_PER_RUNNER" -poll-seconds 1 \
+  -program /bin/bash -- -c 'sleep $((RANDOM % 4)); [ $((RANDOM % 4)) -ne 0 ]' > "$WORK/runner_program.log" 2>&1 &
 PROGRAM_PID=$!
 
-"$BIN" --runner --server "$BASE" --clients "$CLIENTS_PER_RUNNER" --poll-seconds 1 > "$WORK/runner_dummy.log" 2>&1 &
+"$BIN" -runner -server "$BASE" -clients "$CLIENTS_PER_RUNNER" -poll-seconds 1 > "$WORK/runner_dummy.log" 2>&1 &
 DUMMY_PID=$!
 
 for WAIT in $(seq 1 15)

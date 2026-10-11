@@ -18,9 +18,9 @@ struct NumberedOptions
     std::string domain   = "example.com";
 };
 
-// Numbered users, the same shape as the --generate option of nshtestherd (GenerateUsers):
+// Numbered users, the same shape as the -generate option of nshtestherd (GenerateUsers):
 //   Load,000001,TestPassword,load000001,load000001@example.com
-// With the default start the list is identical to GenerateUsers; --start lets a second batch continue
+// With the default start the list is identical to GenerateUsers; -start lets a second batch continue
 // where the first ended. The number is zero padded to at least 6 digits.
 std::vector<UserRecord> NumberedUsers(const NumberedOptions &options);
 

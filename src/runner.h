@@ -15,7 +15,7 @@ struct RunnerConfig
     std::string              serverUrl = "http://127.0.0.1:8788";
     int                      clients    = 0;     // exact count; 0: fill mode (up to maxClients, or until the pool is booked)
     int                      maxClients = 100;   // fill mode limit
-    bool                     fillAll    = false; // fill mode up to 1000 clients (--clients all)
+    bool                     fillAll    = false; // fill mode up to 1000 clients (-clients all)
     int                      pollMs    = 2000;
     std::string              program;     // empty: built-in dummy job
     std::vector<std::string> programArgs; // passed after "--"; {NSHTEST_...} placeholders are replaced per client

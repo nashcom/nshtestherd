@@ -1,6 +1,6 @@
 # Writing a program for the runner
 
-The runner (`nshtestherd --runner --program <exe> -- <args>`) starts your program once per client and `run` command.
+The runner (`nshtestherd -runner -program <exe> -- <args>`) starts your program once per client and `run` command.
 This page is the contract between the runner and that program. It applies to any language: a test program, a Bash script,
 a Notes client tool.
 
@@ -18,7 +18,7 @@ POST /command run job=NAME  -->   next poll sees command_id N
                                   either way: idle, waits for the next command
 ```
 
-- **One process per client.** `--clients 50` means up to 50 children at the same time, each with its own account. That suits
+- **One process per client.** `-clients 50` means up to 50 children at the same time, each with its own account. That suits
   tools that can only act as one identity per process (for example a Notes client).
 - **No shell.** The program is started directly (no `sh -c`, no `cmd.exe`): it must be a real executable. Arguments are passed
   as separate arguments, so spaces in values do not split them.
@@ -50,7 +50,7 @@ Arguments: everything after `--` on the runner's command line, the same for ever
 client. A placeholder is an environment variable name in braces, for example:
 
 ```bash
-nshtestherd --runner --clients 50 --program mytests -- --user {NSHTEST_SHORTNAME} --id-file /tmp/ids/{NSHTEST_TEST_ID}.id --scenario {NSHTEST_JOB}
+nshtestherd -runner -clients 50 -program mytests -- --user {NSHTEST_SHORTNAME} --id-file /tmp/ids/{NSHTEST_TEST_ID}.id --scenario {NSHTEST_JOB}
 ```
 
 - `{NSHTEST_PASSWORD}` is refused: arguments are visible to every user in the process list. Read the password from the
@@ -145,13 +145,13 @@ done
 
 ## Try a program without the real system
 
-1. Start a coordinator with generated accounts: `./nshtestherd --generate 10`.
-2. Start the runner with your program: `./nshtestherd --runner --clients 2 --program ./myprogram -- --user {NSHTEST_SHORTNAME}`.
+1. Start a coordinator with generated accounts: `./nshtestherd -generate 10`.
+2. Start the runner with your program: `./nshtestherd -runner -clients 2 -program ./myprogram -- --user {NSHTEST_SHORTNAME}`.
 3. Send the command: `curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command`.
 4. Watch `curl http://127.0.0.1:8788/status` (`jobs_ok`, `jobs_failed`) and the runner's console. Per client,
    `curl "http://127.0.0.1:8788/client?test_id=1"` shows `last_job_result` (`ok` or `failed`) with the message.
 
-To see what a child receives, use the binary itself as the program (`--program ./nshtestherd -- --child-info`): it prints
+To see what a child receives, use the binary itself as the program (`-program ./nshtestherd -- -child-info`): it prints
 its process id and the `NSHTEST_*` values (never the password). The container route works the same way, see the README.
 
 ## Checklist for a new program

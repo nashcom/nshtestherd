@@ -74,9 +74,9 @@ jobs:
       - name: Check binary version
         run: |
           chmod +x "dist/nshtestherd-$VERSION-amd64"
-          "dist/nshtestherd-$VERSION-amd64" --version
+          "dist/nshtestherd-$VERSION-amd64" -version
           chmod +x "dist/nshtestusers-$VERSION-amd64"
-          "dist/nshtestusers-$VERSION-amd64" --version
+          "dist/nshtestusers-$VERSION-amd64" -version
 
       - name: Package release assets
         run: |

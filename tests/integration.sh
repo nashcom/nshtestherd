@@ -52,10 +52,22 @@ then
   exit 2
 fi
 
+header "Options: one dash, and a double dash is read as the same option"
+
+check "-version and --version print the same" "$("$BIN" --version)" "$("$BIN" -version)"
+check "the usage text has no double dash options" "0" "$("$BIN" -help | grep -c -e '--[a-z]')"
+
+USERS_BIN="$(dirname "$BIN")/nshtestusers"
+if [ -x "$USERS_BIN" ]
+then
+  check "nshtestusers: -generate and --generate give the same list" "$("$USERS_BIN" --generate 3 --prefix t)" "$("$USERS_BIN" -generate 3 -prefix t)"
+  check "nshtestusers: the usage text has no double dash options" "0" "$("$USERS_BIN" -help | grep -c -e '--[a-z]')"
+fi
+
 header "Start server on port $PORT"
 
-# --generate 0: start with an empty pool (the default would generate 100 accounts), the CSV checks load their own
-"$BIN" --port "$PORT" --generate 0 --max-csv-bytes 4096 --timeout 3 &
+# -generate 0: start with an empty pool (the default would generate 100 accounts), the CSV checks load their own
+"$BIN" -port "$PORT" -generate 0 -max-csv-bytes 4096 -timeout 3 &
 PID=$!
 trap 'kill $PID 2>/dev/null' EXIT
 sleep 1

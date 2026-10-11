@@ -21,7 +21,7 @@ One executable, two modes:
 
 ```
   ┌──────────────────────┐            ┌────────────────────────────────┐                                  ┌────────────────────────────────┐
-  │  Prometheus          │            │  nshtestherd                   │                                  │  nshtestherd --runner          │
+  │  Prometheus          │            │  nshtestherd                   │                                  │  nshtestherd -runner          │
   │                      │            │  server mode (default)         │ HTTP: register, status, command  │  optional worker host          │
   │                      │    GET     │                                │      (see docs/PROTOCOL.md)      │                                │
   │  scrapes /metrics    │ ──────────►│  • account pool                │◄──────────────────────────────── │  • N logical clients           │
@@ -47,7 +47,7 @@ One executable, two modes:
 - [Run with Docker](#run-with-docker) - container image and Docker Compose stack
 - [Build](#build) - from source
 - [Server mode](#server-mode) - options, account files, metrics, sizing
-- [Making the user CSV](#making-the-user-csv-nshtestusers) - numbered users or random unique names for `--csv`
+- [Making the user CSV](#making-the-user-csv-nshtestusers) - numbered users or random unique names for `-csv`
 - [Runner (optional)](#runner-optional) - a worker host that launches your test program
 - [Security](#security), [Troubleshooting](#troubleshooting), [Status and limits](#status-and-limits)
 - [Tests](#tests), [Repository layout](#repository-layout), [Releasing](#releasing-maintainers), [License](#license)
@@ -57,17 +57,17 @@ starts (identity, arguments, exit codes, cooperative stop): [docs/RUNNER-PROGRAM
 
 ## Quick start
 
-**1. Start the coordinator** with 20 generated test users (use `--csv your-users.csv` for your own accounts):
+**1. Start the coordinator** with 20 generated test users (use `-csv your-users.csv` for your own accounts):
 
 ```bash
-docker run -d --name herd -p 8788:8788 ghcr.io/nashcom/nshtestherd --bind 0.0.0.0 --generate 20
+docker run -d --name herd -p 8788:8788 ghcr.io/nashcom/nshtestherd -bind 0.0.0.0 -generate 20
 ```
 
 or from source (see [Build](#build)):
 
 ```bash
 make
-./nshtestherd --generate 20
+./nshtestherd -generate 20
 ```
 
 **2. Check that it is up:**
@@ -129,7 +129,7 @@ polls `POST /status`, applies the command and acknowledges it; the two sides are
 child program (here the binary itself, which prints its process id and the account it received):
 
 ```bash
-./nshtestherd --runner --clients 5 --program ./nshtestherd -- --child-info
+./nshtestherd -runner -clients 5 -program ./nshtestherd -- -child-info
 curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
 ```
 
@@ -144,12 +144,12 @@ k6 workers, drives a complete run, pause and stop, checks every step and cleans 
 ## Typical test run
 
 1. **Prepare the accounts.** The users must exist in the system you test, with the passwords in the file. Use your
-   existing nshreg CSV (`--csv users.csv`, see [Account CSV](#account-csv)) or let the coordinator generate names
-   (`--generate N`).
-2. **Start the coordinator** on a machine the test machines can reach: `--bind 0.0.0.0` (or the Docker/Compose
+   existing nshreg CSV (`-csv users.csv`, see [Account CSV](#account-csv)) or let the coordinator generate names
+   (`-generate N`).
+2. **Start the coordinator** on a machine the test machines can reach: `-bind 0.0.0.0` (or the Docker/Compose
    [stack](#docker-compose-stack)). Open the port only for your test network.
 3. **Start the workers.** On every test machine start a runner that launches your test program once per client, for
-   example `nshtestherd --runner --server http://coordinator:8788 --clients 50 --program mytests -- --config mytests.ini`
+   example `nshtestherd -runner -server http://coordinator:8788 -clients 50 -program mytests -- --config mytests.ini`
    (see [Runner](#runner-optional)). Or let your own workers call the API, for example the [k6 worker example](examples/k6/) (it runs in a container).
 4. **Check that everyone is registered:** `curl http://coordinator:8788/status` and compare `clients_total` with what you
    expect (and `users_available` with what is left).
@@ -263,7 +263,7 @@ files), so you can run it without Docker.
 **Server.** Inside a container the server must listen on `0.0.0.0`; the default `127.0.0.1` is not reachable from outside:
 
 ```bash
-docker run -d --name herd -p 8788:8788 ghcr.io/nashcom/nshtestherd --bind 0.0.0.0 --generate 100
+docker run -d --name herd -p 8788:8788 ghcr.io/nashcom/nshtestherd -bind 0.0.0.0 -generate 100
 curl http://127.0.0.1:8788/health
 docker logs herd
 docker stop herd          # SIGTERM: graceful shutdown
@@ -273,24 +273,24 @@ To use your own accounts, mount the CSV read-only (the container user must be ab
 
 ```bash
 docker run -d --name herd -p 8788:8788 -v "$PWD/users.csv:/users.csv:ro" \
-  ghcr.io/nashcom/nshtestherd --bind 0.0.0.0 --csv /users.csv
+  ghcr.io/nashcom/nshtestherd -bind 0.0.0.0 -csv /users.csv
 ```
 
 **Runner.** The same image is the runner. On a user-defined Docker network containers reach each other by name:
 
 ```bash
 docker network create herdnet
-docker run -d --name herd --network herdnet -p 8788:8788 ghcr.io/nashcom/nshtestherd --bind 0.0.0.0 --generate 100
-docker run --rm --network herdnet ghcr.io/nashcom/nshtestherd --runner --server http://herd:8788 --clients 10
+docker run -d --name herd --network herdnet -p 8788:8788 ghcr.io/nashcom/nshtestherd -bind 0.0.0.0 -generate 100
+docker run --rm --network herdnet ghcr.io/nashcom/nshtestherd -runner -server http://herd:8788 -clients 10
 ```
 
-On a different machine use `--server http://<host>:8788`. Stop a runner with Ctrl+C or `docker stop` (clients report `done`).
+On a different machine use `-server http://<host>:8788`. Stop a runner with Ctrl+C or `docker stop` (clients report `done`).
 
 **Smoke test with the image only.** The binary can start itself as the child program, so no load program is needed:
 
 ```bash
-docker run --rm --network herdnet ghcr.io/nashcom/nshtestherd --runner --server http://herd:8788 --clients 2 \
-  --program /nshtestherd -- --child-info
+docker run --rm --network herdnet ghcr.io/nashcom/nshtestherd -runner -server http://herd:8788 -clients 2 \
+  -program /nshtestherd -- -child-info
 curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
 ```
 
@@ -315,10 +315,10 @@ curl http://127.0.0.1:8788/metrics
 docker compose logs -f runner
 ```
 
-| Service  | What it does                                                                   | Profile | Restart policy |
-| -------- | ------------------------------------------------------------------------------ | ------- | -------------- |
-| `herd`   | Coordinator: `--bind 0.0.0.0 --port --generate`, port published on the host    | (none)  | `always`       |
-| `runner` | `--runner --server http://herd:<port> --clients <n>`, reaches the herd by name | `test`  | `no`           |
+| Service  | What it does                                                                | Profile | Restart policy |
+| -------- | --------------------------------------------------------------------------- | ------- | -------------- |
+| `herd`   | Coordinator: `-bind 0.0.0.0 -port -generate`, port published on the host    | (none)  | `always`       |
+| `runner` | `-runner -server http://herd:<port> -clients <n>`, reaches the herd by name | `test`  | `no`           |
 
 The herd always comes back after a Docker or host restart (but a restarted herd is a fresh herd, see below). The runner is
 not restarted automatically: a finished runner (stop command) or a failed one would otherwise register a new set of clients
@@ -354,24 +354,24 @@ docker compose --profile test up -d --scale runner=3   # 3 x RUNNER_CLIENTS clie
 docker compose ps
 ```
 
-**Your own accounts.** Put the CSV next to the compose file and, in `docker-compose.yml`, replace the `--generate` lines in
-the `herd` command with the two commented `--csv` lines, and enable the `volumes` entry (the container user, uid 1000, must be
+**Your own accounts.** Put the CSV next to the compose file and, in `docker-compose.yml`, replace the `-generate` lines in
+the `herd` command with the two commented `-csv` lines, and enable the `volumes` entry (the container user, uid 1000, must be
 able to read `users.csv`):
 
 ```yaml
     command:
-      - "--bind"
+      - "-bind"
       - "0.0.0.0"
-      - "--port"
+      - "-port"
       - "${HERD_PORT:-8788}"
-      - "--csv"
+      - "-csv"
       - "/users.csv"
 
     volumes:
       - ./users.csv:/users.csv:ro
 ```
 
-**Smoke test without a load program.** Enable the commented `--program /nshtestherd -- --child-info` lines in the `runner`
+**Smoke test without a load program.** Enable the commented `-program /nshtestherd -- -child-info` lines in the `runner`
 command. After a `run` command each client's child prints `child pid=... NSHTEST_SHORTNAME=...` in `docker compose logs runner`.
 A real load program needs a derived image (see above); put its image name in `NSHTESTHERD_IMAGE` or in a `build:` of your own.
 
@@ -381,7 +381,7 @@ only: there is no TLS and `/register` returns passwords), then start a runner on
 ```bash
 export NSHTEST_TOKEN=$(openssl rand -hex 24)
 HERD_BIND=0.0.0.0 docker compose up -d herd
-docker run --rm -e NSHTEST_TOKEN ghcr.io/nashcom/nshtestherd --runner --server http://<herd-host>:8788 --clients 20
+docker run --rm -e NSHTEST_TOKEN ghcr.io/nashcom/nshtestherd -runner -server http://<herd-host>:8788 -clients 20
 ```
 
 **Stopping and restarting.** `docker compose --profile test down` removes the containers, including the runner (without
@@ -412,8 +412,8 @@ ENTRYPOINT ["/usr/local/bin/nshtestherd"]
 ```
 
 ```bash
-docker run --rm --network herdnet my-runner --runner --server http://herd:8788 --clients 10 \
-  --program /usr/local/bin/mytests -- --config /etc/mytests.ini
+docker run --rm --network herdnet my-runner -runner -server http://herd:8788 -clients 10 \
+  -program /usr/local/bin/mytests -- --config /etc/mytests.ini
 ```
 
 The runner passes the account to each `mytests` process in `NSHTEST_*` environment variables (see [Runner](#runner-optional)).
@@ -464,25 +464,25 @@ g++ -std=c++17 -O2 -o nshtestherd.exe src/main.cpp src/http.cpp src/runner.cpp s
 ## Server mode
 
 `nshtestherd [options]` is the default mode. It runs in the foreground; Ctrl+C / SIGTERM shuts down gracefully.
-Without `--csv` or `--generate` it generates **100 accounts** (`load000001` ... with the password `TestPassword`), so a
+Without `-csv` or `-generate` it generates **100 accounts** (`load000001` ... with the password `TestPassword`), so a
 coordinator works without any option; `POST /load` can still replace them until the first registration. To start with
-an empty pool use `--generate 0`: registration then returns 409 `no_accounts_loaded` until `POST /load` brings accounts.
+an empty pool use `-generate 0`: registration then returns 409 `no_accounts_loaded` until `POST /load` brings accounts.
 
-| Option                | Default        | Meaning                                                               |
-| --------------------- | -------------- | --------------------------------------------------------------------- |
-| `--bind <ipv4>`       | `127.0.0.1`    | Listen address (IPv4). `0.0.0.0` for remote workers                   |
-| `--port <n>`          | `8788`         | Listen port                                                           |
-| `--csv <file>`        | none           | Load accounts at startup                                              |
-| `--generate <n>`      | `100`          | No CSV: generate `n` accounts (0-1000000; 0: empty pool); not with `--csv` |
-| `--prefix <name>`     | `load`         | Generated name prefix (`load000001`); not with `--csv`                |
-| `--password <pw>`     | `TestPassword` | Generated password; not with `--csv`                                  |
-| `--domain <name>`     | `example.com`  | Generated mail domain; not with `--csv`                               |
-| `--worker-options <s>`| none           | Options for the workers, returned with every registration (`name=value&name`); each worker takes what it knows (domlem: `switch`) |
-| `--threads <n>`       | `8`            | Worker threads; 64 more connections may wait, then 503                |
-| `--max-csv-bytes <n>` | `16777216`     | Size limit for `POST /load` (other bodies 64 KB, headers 16 KB)       |
-| `--timeout <s>`       | `10`           | Socket timeout and deadline for reading one request                   |
-| `--verbose`           | off            | Log one line per request (method, path, status, `test_id`); no bodies |
-| `--version`, `--help` |                | Print version / usage                                                 |
+| Option                | Default        | Meaning                                                                                                                           |
+| --------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `-bind <ipv4>`        | `127.0.0.1`    | Listen address (IPv4). `0.0.0.0` for remote workers                                                                               |
+| `-port <n>`           | `8788`         | Listen port                                                                                                                       |
+| `-csv <file>`         | none           | Load accounts at startup                                                                                                          |
+| `-generate <n>`       | `100`          | No CSV: generate `n` accounts (0-1000000; 0: empty pool); not with `-csv`                                                         |
+| `-prefix <name>`      | `load`         | Generated name prefix (`load000001`); not with `-csv`                                                                             |
+| `-password <pw>`      | `TestPassword` | Generated password; not with `-csv`                                                                                               |
+| `-domain <name>`      | `example.com`  | Generated mail domain; not with `-csv`                                                                                            |
+| `-worker-options <s>` | none           | Options for the workers, returned with every registration (`name=value&name`); each worker takes what it knows (domlem: `switch`) |
+| `-threads <n>`        | `8`            | Worker threads; 64 more connections may wait, then 503                                                                            |
+| `-max-csv-bytes <n>`  | `16777216`     | Size limit for `POST /load` (other bodies 64 KB, headers 16 KB)                                                                   |
+| `-timeout <s>`        | `10`           | Socket timeout and deadline for reading one request                                                                               |
+| `-verbose`            | off            | Log one line per request (method, path, status, `test_id`); no bodies                                                             |
+| `-version`, `-help`   |                | Print version / usage                                                                                                             |
 
 Exit codes: 0 normal stop, 1 startup failure (cannot bind, CSV unreadable or invalid, worker threads cannot be started), 2 usage error.
 
@@ -505,7 +505,7 @@ until the first client registers (then 409). A sample is in [examples/users.csv]
 
 ### Generated accounts
 
-`--generate N` builds the same pool a CSV would give, without a file. Names are the prefix plus a zero-padded
+`-generate N` builds the same pool a CSV would give, without a file. Names are the prefix plus a zero-padded
 number (at least 6 digits): `load000001`, `load000002`, ... with the defaults. The pool is bounded; when it is
 booked, registration returns 409 `pool_exhausted`.
 
@@ -538,49 +538,49 @@ rate(nshtestherd_jobs_ended_total{result="failed"}[5m]) # failed jobs per second
 
 - **Not load-tested yet.** Treat any client count above a few hundred as something to try first, and tell us what you find.
 - **Load profile.** Requests are tiny and handled in microseconds. The main load is polling: `N` clients polling every
-  2 seconds (the runner default, `--poll-seconds`) is about `N / 2` requests per second. Use a longer interval for very
+  2 seconds (the runner default, `-poll-seconds`) is about `N / 2` requests per second. Use a longer interval for very
   large herds.
-- **Limits.** `--threads` workers (default 8) serve requests; up to 64 more connections wait in a queue and further ones get
-  `503`, which the runner retries. Raise `--threads` before raising the polling rate. State is in memory, a few hundred
+- **Limits.** `-threads` workers (default 8) serve requests; up to 64 more connections wait in a queue and further ones get
+  `503`, which the runner retries. Raise `-threads` before raising the polling rate. State is in memory, a few hundred
   bytes per client.
 - **Running it.** The server runs in the foreground and logs to stdout/stderr; stop it with Ctrl+C or SIGTERM (graceful).
   As a service use Docker/Compose (`restart: always`) or your own service manager. A restart is a fresh herd.
 
 ## Making the user CSV (nshtestusers)
 
-`nshtestusers` writes the account CSV that `--csv` reads (and that your registration tool takes): numbered users like
-`--generate`, or users with random unique names. It is built by `make` together with `nshtestherd` (source in
+`nshtestusers` writes the account CSV that `-csv` reads (and that your registration tool takes): numbered users like
+`-generate`, or users with random unique names. It is built by `make` together with `nshtestherd` (source in
 `tools/nshtestusers/`, it uses `src/csv.cpp`, so a file it writes is read by the same parser as the coordinator's) and
 is also in the container image. It only writes the file; creating the users in your system stays with your registration tool.
 
 ```bash
-nshtestusers --generate 500 --output users.csv                  # load000001 ... load000500, password TestPassword
-nshtestusers --generate 200 --prefix perf --domain lab.example.com --random-passwords --output users.csv
-nshtestusers --names --generate 200 --domain lab.example.com --random-passwords --output users.csv
-nshtestusers --check users.csv                                  # validate a CSV: format, duplicate names and addresses
+nshtestusers -generate 500 -output users.csv                  # load000001 ... load000500, password TestPassword
+nshtestusers -generate 200 -prefix perf -domain lab.example.com -random-passwords -output users.csv
+nshtestusers -names -generate 200 -domain lab.example.com -random-passwords -output users.csv
+nshtestusers -check users.csv                                  # validate a CSV: format, duplicate names and addresses
 
 # the container image has it too (the file goes to standard output)
-docker run --rm --entrypoint /nshtestusers ghcr.io/nashcom/nshtestherd --generate 50 > users.csv
+docker run --rm --entrypoint /nshtestusers ghcr.io/nashcom/nshtestherd -generate 50 > users.csv
 ```
 
-| Option                  | Default        | Meaning                                                                                      |
-| ----------------------- | -------------- | -------------------------------------------------------------------------------------------- |
-| `--generate <n>`        | `100`          | number of users (1 to 1000000)                                                               |
-| `--prefix <name>`       | `load`         | numbered users: name prefix (`load000001`); the first name is the prefix with a capital      |
-| `--start <n>`           | `1`            | numbered users: first number, to continue an earlier list                                    |
-| `--password <pw>`       | `TestPassword` | the password of every user                                                                   |
-| `--random-passwords`    | off            | a different random password per user (not together with `--password`)                        |
-| `--password-length <n>` | `16`           | length of the random passwords (8 to 128)                                                    |
-| `--domain <name>`       | `example.com`  | mail domain                                                                                  |
-| `--names`               | off            | random unique names (`anna.meyer@example.com`) instead of numbers                            |
-| `--seed <n>`            | random         | with `--names`: the same seed gives the same list (it is printed when not given)             |
-| `--exclude <file>`      | none           | with `--names`: skip the names of an earlier list, so a second batch does not collide        |
-| `--output <file>`       | stdout         | write the file, readable for the owner only (mode 0600); `--force` replaces an existing file |
-| `--header`              | off            | write the header row `FirstName,LastName,Password,Shortname,InternetAddress`                 |
-| `--check <file>`        |                | validate a user CSV with the parser of `nshtestherd` and look for duplicates; then exit      |
+| Option                 | Default        | Meaning                                                                                     |
+| ---------------------- | -------------- | ------------------------------------------------------------------------------------------- |
+| `-generate <n>`        | `100`          | number of users (1 to 1000000)                                                              |
+| `-prefix <name>`       | `load`         | numbered users: name prefix (`load000001`); the first name is the prefix with a capital     |
+| `-start <n>`           | `1`            | numbered users: first number, to continue an earlier list                                   |
+| `-password <pw>`       | `TestPassword` | the password of every user                                                                  |
+| `-random-passwords`    | off            | a different random password per user (not together with `-password`)                        |
+| `-password-length <n>` | `16`           | length of the random passwords (8 to 128)                                                   |
+| `-domain <name>`       | `example.com`  | mail domain                                                                                 |
+| `-names`               | off            | random unique names (`anna.meyer@example.com`) instead of numbers                           |
+| `-seed <n>`            | random         | with `-names`: the same seed gives the same list (it is printed when not given)             |
+| `-exclude <file>`      | none           | with `-names`: skip the names of an earlier list, so a second batch does not collide        |
+| `-output <file>`       | stdout         | write the file, readable for the owner only (mode 0600); `-force` replaces an existing file |
+| `-header`              | off            | write the header row `FirstName,LastName,Password,Shortname,InternetAddress`                |
+| `-check <file>`        |                | validate a user CSV with the parser of `nshtestherd` and look for duplicates; then exit     |
 
-With the default options the numbered list is identical to what `nshtestherd --generate` hands out (`--prefix`,
-`--password` and `--domain` mean the same). `--names` takes first and last names from built-in lists (ASCII only, 1210
+With the default options the numbered list is identical to what `nshtestherd -generate` hands out (`-prefix`,
+`-password` and `-domain` mean the same). `-names` takes first and last names from built-in lists (ASCII only, 1210
 and 1270 names: 1536700 different users). Every combination is used at most once, and short names (`first.last`) and
 addresses are checked for duplicates before the file is written. More users than combinations is an error.
 
@@ -592,48 +592,48 @@ A million users take a few seconds. Exit codes: 0 ok, 1 failure (cannot write, c
 
 ## Runner (optional)
 
-The same executable can act as a worker host. `--runner` connects to a separate
+The same executable can act as a worker host. `-runner` connects to a separate
 coordinator over HTTP (using only the public API) and can run on any test machine.
 The server does not need it; any HTTP client can be a worker.
 
 ```bash
-nshtestherd --csv users.csv --port 8788                                   # coordinator
-nshtestherd --runner --server http://coordinator:8788                     # up to 100 clients (fewer if the pool is booked)
-nshtestherd --runner --server http://coordinator:8788 --clients 100       # exactly 100 (per machine), built-in dummy job
-nshtestherd --runner --server http://coordinator:8788 --clients all       # one client per free account (max 1000), single runner
-nshtestherd --runner --server http://coordinator:8788 --clients 100 \
-  --program mytests -- --user {NSHTEST_SHORTNAME} --id {NSHTEST_TEST_ID}            # external program, per-client arguments
+nshtestherd -csv users.csv -port 8788                                   # coordinator
+nshtestherd -runner -server http://coordinator:8788                     # up to 100 clients (fewer if the pool is booked)
+nshtestherd -runner -server http://coordinator:8788 -clients 100       # exactly 100 (per machine), built-in dummy job
+nshtestherd -runner -server http://coordinator:8788 -clients all       # one client per free account (max 1000), single runner
+nshtestherd -runner -server http://coordinator:8788 -clients 100 \
+  -program mytests -- --user {NSHTEST_SHORTNAME} --id {NSHTEST_TEST_ID}            # external program, per-client arguments
 ```
 
-| Option               | Default                 | Meaning                                                         |
-| -------------------- | ----------------------- | --------------------------------------------------------------- |
-| `--runner`           |                         | Select runner mode                                              |
-| `--server <url>`     | `http://127.0.0.1:8788` | Coordinator, `http://host[:port]` (no https)                    |
-| `--clients <n\|all>` | up to `--max-clients`   | Exactly `n` (max 1000), or `all`: until the pool is booked      |
-| `--max-clients <n>`  | `100`                   | Limit for the default mode; not with `--clients`                |
-| `--program <exe>`    | none (dummy job)        | Start this program once per client and `run` command            |
-| `-- <args...>`       |                         | Arguments passed unchanged to every program (needs `--program`) |
-| `--poll-seconds <n>` | `2`                     | Status polling interval                                         |
-| `--verbose`          | off                     | Accepted for symmetry; the runner always logs key events        |
+| Option              | Default                 | Meaning                                                        |
+| ------------------- | ----------------------- | -------------------------------------------------------------- |
+| `-runner`           |                         | Select runner mode                                             |
+| `-server <url>`     | `http://127.0.0.1:8788` | Coordinator, `http://host[:port]` (no https)                   |
+| `-clients <n\|all>` | up to `-max-clients`    | Exactly `n` (max 1000), or `all`: until the pool is booked     |
+| `-max-clients <n>`  | `100`                   | Limit for the default mode; not with `-clients`                |
+| `-program <exe>`    | none (dummy job)        | Start this program once per client and `run` command           |
+| `-- <args...>`      |                         | Arguments passed unchanged to every program (needs `-program`) |
+| `-poll-seconds <n>` | `2`                     | Status polling interval                                        |
+| `-verbose`          | off                     | Accepted for symmetry; the runner always logs key events       |
 
-Server options (`--bind --port --csv --generate --prefix --password --domain --threads --max-csv-bytes --timeout`)
+Server options (`-bind -port -csv -generate -prefix -password -domain -threads -max-csv-bytes -timeout`)
 and runner options cannot be mixed. Exit codes: 0 no client failed, 1 at least one client failed (refused
 registration, coordinator lost), 2 usage error. A failed job is not a failed client.
 
 How many clients:
 
-- `--clients N` starts exactly N clients (a booked pool then counts as a failure). Run one runner per machine,
+- `-clients N` starts exactly N clients (a booked pool then counts as a failure). Run one runner per machine,
   each with its own N; they draw from the same pool, so ids and accounts never overlap.
-- Without `--clients` the runner starts up to `--max-clients` (default 100) clients, one registration at a time,
+- Without `-clients` the runner starts up to `-max-clients` (default 100) clients, one registration at a time,
   and stops early when the pool is booked (`pool_exhausted`).
-- `--clients all` keeps going until the pool is booked (max 1000). Use it with a single runner, because it takes
+- `-clients all` keeps going until the pool is booked (max 1000). Use it with a single runner, because it takes
   every free account. One thread per client, so a pool above 1000 needs several runners.
 
 Behaviour:
 
 - Each client registers separately (own `request_key`, own sequential `test_id` and account) and tracks its own
   state, command id, acknowledgement and pause timer. Polling continues while idle, working or paused.
-- **Dummy job** (no `--program`): `run` marks the client running until superseded. It exercises
+- **Dummy job** (no `-program`): `run` marks the client running until superseded. It exercises
   allocation, commands, status reports and the coordinator metrics.
 - **External program**: every `run` command starts one child per client, directly (no shell;
   use a real executable, not a `.bat`/`.cmd`). Arguments after `--` go to every child, with placeholders replaced
@@ -659,7 +659,7 @@ Behaviour:
   arguments after `--`. The placeholders are exactly the environment variable names above, so there is nothing new to learn:
 
   ```bash
-  nshtestherd --runner --clients 50 --program mytests -- --user {NSHTEST_SHORTNAME} --id {NSHTEST_TEST_ID} --scenario {NSHTEST_JOB}
+  nshtestherd -runner -clients 50 -program mytests -- --user {NSHTEST_SHORTNAME} --id {NSHTEST_TEST_ID} --scenario {NSHTEST_JOB}
   ```
 
   For client 7 the child is started as `mytests --user load000007 --id 7 --scenario <job of the run command>`.
@@ -705,17 +705,17 @@ Behaviour:
 - If the runner cannot start a client thread (resource limits) it stops the clients already running, joins them
   and exits 1 instead of carrying on with a partial herd. The server does the same if it cannot start its worker
   threads.
-- Windows: account values and `--program` arguments are handled as UTF-8 (wide process APIs). The `--csv` path
+- Windows: account values and `-program` arguments are handled as UTF-8 (wide process APIs). The `-csv` path
   must be ASCII on Windows.
 
 ### Smoke test without any load program
 
-The runner can start `nshtestherd` itself as the child. `--child-info` prints the child's process id and the
+The runner can start `nshtestherd` itself as the child. `-child-info` prints the child's process id and the
 `NSHTEST_*` values it received (never the password) and exits 0:
 
 ```bash
-./nshtestherd --generate 10
-./nshtestherd --runner --clients 2 --program ./nshtestherd -- --child-info
+./nshtestherd -generate 10
+./nshtestherd -runner -clients 2 -program ./nshtestherd -- -child-info
 curl -X POST -d 'target=all&command=run&job=demo' http://127.0.0.1:8788/command
 # [client 1 ...] child pid=4711 NSHTEST_TEST_ID=1 NSHTEST_SHORTNAME=load000001 NSHTEST_JOB=demo ... NSHTEST_PASSWORD=(set)
 ```
@@ -745,10 +745,10 @@ nshtestherd is a test tool for a trusted network. Know what an open port means:
   the process list) every call but `GET /health` needs `Authorization: Bearer <token>`; the runner, domlem and the
   examples read the same `NSHTEST_TOKEN` and send it. The token travels in plain text: it keeps strangers out, not
   someone who can read the traffic. Generate one with `openssl rand -hex 24`.
-- **Safe defaults.** The server listens on `127.0.0.1`; the Compose stack publishes on `127.0.0.1`. Use `--bind 0.0.0.0` /
+- **Safe defaults.** The server listens on `127.0.0.1`; the Compose stack publishes on `127.0.0.1`. Use `-bind 0.0.0.0` /
   `HERD_BIND=0.0.0.0` only on a test network, and limit the port (8788 by default) with a firewall to the test machines.
 - **Across untrusted networks** put it behind an SSH tunnel or a TLS reverse proxy with authentication of your choice.
-- **Use test accounts only,** never real users. Passwords are kept in memory, are never written to logs (`--verbose` logs
+- **Use test accounts only,** never real users. Passwords are kept in memory, are never written to logs (`-verbose` logs
   method, path, status and `test_id` only, no bodies) and are not in metrics.
 - **Child programs** started by the runner receive the account in environment variables (never on the command line, so
   not in `ps`). The same OS user and root can read a process environment.
@@ -756,30 +756,30 @@ nshtestherd is a test tool for a trusted network. Know what an open port means:
 
 ## Troubleshooting
 
-| Symptom                               | Cause / fix                                                               |
-| ------------------------------------- | ------------------------------------------------------------------------- |
-| Registration 409 `no_accounts_loaded` | Started with `--generate 0`: `POST /load` the accounts; runners wait      |
-| Registration 409 `pool_exhausted`     | All accounts booked: restart the server, or load a larger pool            |
-| `POST /load` 409 `load_not_allowed`   | A client already registered: restart the server to load another pool      |
-| Runner: "no longer knows this client" | The server was restarted: stop old runners before restarting it           |
-| Runner: "coordinator unreachable"     | Wrong `--server`, server down, or `--bind 127.0.0.1` with a remote runner |
+| Symptom                               | Cause / fix                                                                                 |
+| ------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Registration 409 `no_accounts_loaded` | Started with `-generate 0`: `POST /load` the accounts; runners wait                         |
+| Registration 409 `pool_exhausted`     | All accounts booked: restart the server, or load a larger pool                              |
+| `POST /load` 409 `load_not_allowed`   | A client already registered: restart the server to load another pool                        |
+| Runner: "no longer knows this client" | The server was restarted: stop old runners before restarting it                             |
+| Runner: "coordinator unreachable"     | Wrong `-server`, server down, or `-bind 127.0.0.1` with a remote runner                     |
 | 401 `unauthorized`                    | The coordinator has a token: send `Authorization: Bearer <token>` (runner: `NSHTEST_TOKEN`) |
-| 503 from the server                   | More than 64 waiting connections: raise `--threads` or poll less often    |
-| 413                                   | Request too large (64 KB; `--max-csv-bytes` for `/load`)                  |
-| Cannot bind: "Address already in use" | Another process uses the port: stop it or set `--port`                    |
-| Want to start over                    | Restart the coordinator (stop the workers first): a fresh herd            |
+| 503 from the server                   | More than 64 waiting connections: raise `-threads` or poll less often                       |
+| 413                                   | Request too large (64 KB; `-max-csv-bytes` for `/load`)                                     |
+| Cannot bind: "Address already in use" | Another process uses the port: stop it or set `-port`                                       |
+| Want to start over                    | Restart the coordinator (stop the workers first): a fresh herd                              |
 
 ## Status and limits
 
-| Area                                     | State                                                                 |
-| ---------------------------------------- | --------------------------------------------------------------------- |
-| Server, runner, CSV import, `--generate` | Complete                                                              |
-| Tested on                                | Linux (g++, GNU make): all test suites pass                           |
-| Windows build                            | Written (Winsock, `CreateProcess`), **not yet built or tested**       |
-| Not tested                               | Heavy load (503 on queue overflow, slow clients, 1000 runner clients) |
+| Area                                    | State                                                                 |
+| --------------------------------------- | --------------------------------------------------------------------- |
+| Server, runner, CSV import, `-generate` | Complete                                                              |
+| Tested on                               | Linux (g++, GNU make): all test suites pass                           |
+| Windows build                           | Written (Winsock, `CreateProcess`), **not yet built or tested**       |
+| Not tested                              | Heavy load (503 on queue overflow, slow clients, 1000 runner clients) |
 
 - All state in memory. No persistence, leases, or automatic account reclamation after a crashed worker.
-- No TLS, and authentication is one optional shared token: run it on a trusted test network. `--bind 0.0.0.0` exposes the
+- No TLS, and authentication is one optional shared token: run it on a trusted test network. `-bind 0.0.0.0` exposes the
   passwords returned by `/register` to anyone who reaches the port (and has the token, when one is set).
 - IPv4 only; the runner talks `http://` only.
 - One request per connection (no keep-alive, no chunked request bodies).
@@ -794,13 +794,13 @@ tests/integration.sh ./nshtestherd   # HTTP layer with curl (default port 18788,
 tests/testrun.sh                     # longer run, job results add up (60 s; tests/testrun.sh 600 for 10 minutes; port 18789)
 ```
 
-| Test             | What it covers                                                                         |
-| ---------------- | -------------------------------------------------------------------------------------- |
-| `test_core`      | CSV, wire format, `--generate`, allocation, exhaustion, concurrency, commands, metrics |
-| `test_runner`    | Runner against an in-process coordinator: dummy clients, fill and cap, child programs  |
-| `test_users`     | nshtestusers: name lists, numbered and random users, passwords, CSV                    |
-| `integration.sh` | Real HTTP with curl: limits, methods, CSV, retry keys, metrics, shutdown               |
-| `testrun.sh`     | Coordinator and two runners under random commands: job results counted exactly once    |
+| Test             | What it covers                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------- |
+| `test_core`      | CSV, wire format, `-generate`, allocation, exhaustion, concurrency, commands, metrics |
+| `test_runner`    | Runner against an in-process coordinator: dummy clients, fill and cap, child programs |
+| `test_users`     | nshtestusers: name lists, numbered and random users, passwords, CSV                   |
+| `integration.sh` | Real HTTP with curl: limits, methods, CSV, retry keys, metrics, shutdown              |
+| `testrun.sh`     | Coordinator and two runners under random commands: job results counted exactly once   |
 
 `testrun.sh` starts a coordinator and two runners with 5 clients each: one runs a small bash job (0-3 s, about one
 run in four fails), the other the built-in dummy job (it never ends by itself, so it ends as `stopped`). For the given
@@ -809,7 +809,7 @@ them all. It checks that every client ended `done` and that the `ok`, `failed` a
 equal the job results in the runner logs, and that `/metrics` says the same. The logs are kept when a check fails.
 
 `test_runner` scenarios: dummy clients, fill mode and client cap, argument placeholders, a `/bin/sh` child with a failing job, a program that
-cannot be started, a job result that survives a refused report, the self-child (`--child-info`), reply framing (truncated and chunked replies are rejected) and a
+cannot be started, a job result that survives a refused report, the self-child (`-child-info`), reply framing (truncated and chunked replies are rejected) and a
 child that ignores SIGTERM (killed and reaped). It uses `127.0.0.1:18790` (`HERD_TEST_PORT`) and is skipped if that
 port is busy.
 
@@ -826,7 +826,7 @@ The `/bin/sh` scenarios are POSIX only; the self-child scenario also runs on Win
 
 ```
 src/platform.h    socket portability (Winsock / POSIX)
-src/csv.*         account import and --generate
+src/csv.*         account import and -generate
 src/wire.*        flat fields, text/JSON rendering, form decoding
 src/herd.*        in-memory state, one mutex, no socket access
 src/api.*         routing and request validation (testable without sockets)
@@ -854,7 +854,7 @@ CHANGES.md        what changed in every version (also the text of the GitHub rel
 ## Releasing (maintainers)
 
 The version lives in one place: `NSHTESTHERD_VERSION` in [src/version.h](src/version.h) (currently `0.9.1`). It is what
-`./nshtestherd --version` prints and what the server shows in its startup line. `version.txt` is a convenience copy
+`./nshtestherd -version` prints and what the server shows in its startup line. `version.txt` is a convenience copy
 (anyone can read the latest released version without parsing the header); it plays no part in the build.
 
 Every change goes into [CHANGES.md](CHANGES.md) together with the change itself, under the heading of the coming

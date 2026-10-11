@@ -311,7 +311,7 @@ int RunRunner(const RunnerConfig &config, const std::atomic<bool> &stop)
     std::snprintf(runId, sizeof(runId), "r%08x%08x", rd(), rd());
 
     // clients == 0: fill mode, start clients until the pool is booked or the limit is reached
-    // (config.maxClients by default, MAX_CLIENTS with --clients all)
+    // (config.maxClients by default, MAX_CLIENTS with -clients all)
     const bool fill  = (config.clients <= 0);
     const int  limit = fill ? (config.fillAll ? MAX_CLIENTS : std::min(config.maxClients, MAX_CLIENTS)) : config.clients;
 
@@ -380,7 +380,7 @@ int RunRunner(const RunnerConfig &config, const std::atomic<bool> &stop)
             break;
 
         if (i + 1 == limit)
-            std::printf("Client limit (%d) reached; the pool may have more free accounts (see --max-clients, --clients)\n", limit);
+            std::printf("Client limit (%d) reached; the pool may have more free accounts (see -max-clients, -clients)\n", limit);
     }
 
     for (std::thread &t : threads)

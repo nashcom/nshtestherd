@@ -24,7 +24,7 @@ struct HerdAccount
     std::string password;
     std::string shortName;
     std::string internetAddress;
-    std::string workerOptions;   // the coordinator's --worker-options ("name=value&name"; empty: none). Not interpreted
+    std::string workerOptions;   // the coordinator's -worker-options ("name=value&name"; empty: none). Not interpreted
                                  // here: each program takes what it knows and ignores the rest (domlem: "switch")
 };
 

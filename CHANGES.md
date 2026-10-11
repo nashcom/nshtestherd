@@ -5,21 +5,26 @@ that has no section here, and prints the section as the text for the GitHub rele
 
 ## 0.9.1
 
-**New tool: `nshtestusers`.** Makes the account CSV for `--csv` (and for your registration tool): numbered users or
+**One dash for the options.** All options are written with a single dash: `-bind`, `-port`, `-csv`, `-generate`, `-runner`, `-server`,
+`-clients` and the rest, and the same for `nshtestusers` (`-generate`, `-output`, `-check`). The old double dash (`--bind`) is still read as
+the same option, so nothing that calls the tools breaks; the usage text, the README and the examples show the single dash only. A
+`--` alone still separates the arguments of the program that the runner starts.
+
+**New tool: `nshtestusers`.** Makes the account CSV for `-csv` (and for your registration tool): numbered users or
 users with random unique names. It has its own section in the README ("Making the user CSV") and lives in
 `tools/nshtestusers/`; it uses `src/csv.cpp`, so the file it writes is read by the same parser as the coordinator's.
 
-- Numbered users with the options of `--generate` (`--generate`, `--prefix`, `--password`, `--domain`) plus `--start`
-  to continue an earlier list; with the defaults the list is identical to what `--generate` hands out.
-- Random unique names (`--names`): 1210 first and 1270 last names (ASCII), every combination at most once, short
-  names and addresses checked for duplicates; `--seed` for the same list again, `--exclude <file>` to skip the names
+- Numbered users with the options of `-generate` (`-generate`, `-prefix`, `-password`, `-domain`) plus `-start`
+  to continue an earlier list; with the defaults the list is identical to what `-generate` hands out.
+- Random unique names (`-names`): 1210 first and 1270 last names (ASCII), every combination at most once, short
+  names and addresses checked for duplicates; `-seed` for the same list again, `-exclude <file>` to skip the names
   of an earlier list.
-- Passwords: one for everybody, or `--random-passwords` (a different one per user, from the operating system's
+- Passwords: one for everybody, or `-random-passwords` (a different one per user, from the operating system's
   generator, length 8 to 128).
-- `--output` writes the file readable for the owner only and does not replace an existing file without `--force`;
-  `--check <file>` validates a user CSV.
+- `-output` writes the file readable for the owner only and does not replace an existing file without `-force`;
+  `-check <file>` validates a user CSV.
 - `make` builds it with `nshtestherd`, `make test` runs the new `test_users`, and the container image has it as
-  `/nshtestusers` (`docker run --rm --entrypoint /nshtestusers ghcr.io/nashcom/nshtestherd --generate 50 > users.csv`).
+  `/nshtestusers` (`docker run --rm --entrypoint /nshtestusers ghcr.io/nashcom/nshtestherd -generate 50 > users.csv`).
 
 **Renamed environment variables.** The variables the runner sets for its programs are now `NSHTEST_*` instead of
 `NSH_*`: `NSHTEST_TEST_ID`, `NSHTEST_FIRSTNAME`, `NSHTEST_LASTNAME`, `NSHTEST_SHORTNAME`, `NSHTEST_INTERNETADDRESS`,
@@ -38,10 +43,10 @@ Coordinator and protocol:
   `stopped`), counted once per job. `/client` shows the last job of a client, `/status` has `jobs_ok`, `jobs_failed`
   and `jobs_stopped`, `/metrics` has `nshtestherd_jobs_ended_total{result="..."}`.
 - Status messages may be up to 2048 bytes (was 512).
-- Worker options: `--worker-options <name=value&name>` is returned with every registration (`worker_options`). The
+- Worker options: `-worker-options <name=value&name>` is returned with every registration (`worker_options`). The
   coordinator does not interpret it; each worker takes what it knows (domlem: `switch`) and ignores the rest.
-- Without `--csv` or `--generate` the coordinator generates 100 accounts, so it works without any option.
-  `--generate 0` starts with an empty pool that waits for `POST /load` (what an option-less start did before).
+- Without `-csv` or `-generate` the coordinator generates 100 accounts, so it works without any option.
+  `-generate 0` starts with an empty pool that waits for `POST /load` (what an option-less start did before).
 
 Workers and runner:
 
@@ -71,4 +76,4 @@ them, and checks that every job result the runners logged was counted exactly on
 ## 0.9.0
 
 First release: coordinator (account pool, sequential test ids, commands, Prometheus metrics), optional runner,
-`--generate`, Docker image and Compose stack, k6 and Bash worker examples.
+`-generate`, Docker image and Compose stack, k6 and Bash worker examples.

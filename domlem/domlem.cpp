@@ -217,7 +217,7 @@ Done:
 }
 
 
-/* The coordinator's worker options (--worker-options, the same for every worker of the herd). domlem takes "switch"
+/* The coordinator's worker options (-worker-options, the same for every worker of the herd). domlem takes "switch"
  * ("switch", "switch=1", "switch=0") and ignores every other name: the options may be meant for other kinds of workers.
  * This server has the last word: a switch set here (command line or DOMLEM_SWITCH, also =0) is not changed. */
 

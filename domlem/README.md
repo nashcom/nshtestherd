@@ -36,7 +36,7 @@ You need a Domino server with the Notes C API build environment (see [Build](#bu
 **1. Start the coordinator** (any machine that the server can reach, see the main README), with some test accounts:
 
 ```bash
-nshtestherd --generate 20
+nshtestherd -generate 20
 ```
 
 **2. Build and install domlem on the Domino server**:
@@ -287,12 +287,12 @@ unless the server has a mail file. For a test without `-switch` use `-mailto` or
 
 Where the mode comes from, the first one that is set wins:
 
-| Order | Where                                        | Example                                                          |
-| ----- | -------------------------------------------- | ---------------------------------------------------------------- |
-| 1     | Command line of the lemming                  | `load domlem -switch`, or `load domlem switch=0` to keep the identity |
-| 2     | Server environment, else `notes.ini`         | `set config DOMLEM_SWITCH=1` (or `=0`)                           |
-| 3     | The coordinator's worker options             | `nshtestherd --worker-options switch`                            |
-| 4     | Default                                      | off: keep the identity                                           |
+| Order | Where                                | Example                                                               |
+| ----- | ------------------------------------ | --------------------------------------------------------------------- |
+| 1     | Command line of the lemming          | `load domlem -switch`, or `load domlem switch=0` to keep the identity |
+| 2     | Server environment, else `notes.ini` | `set config DOMLEM_SWITCH=1` (or `=0`)                                |
+| 3     | The coordinator's worker options     | `nshtestherd -worker-options switch`                                  |
+| 4     | Default                              | off: keep the identity                                                |
 
 So the coordinator can turn the switch on for a whole herd of lemmings, but the Domino server has the last word: a switch
 set on the server (1 or 2, also `=0`) is not changed by the coordinator; the log says so when the coordinator asks for
@@ -448,7 +448,7 @@ documents.
 - The coordinator decides everything. `run <job>` starts a job, `pause` stops the steps for the given time, `stop` ends
   the process (it reports `done`), a server `quit` ends it too. The worker contract (registration with a request key,
   polling, acknowledgements, job results, `done` and `error` reporting, lost allocations) is in the shared core, the
-  same as for the generic `nshtestherd --runner`.
+  same as for the generic `nshtestherd -runner`.
 - One step per poll while the worker is `running`. A step that fails ends the job, not the worker: the job is reported as
   `failed` with the reason, the handles are closed, and the worker is `idle` again. An unknown job name or invalid job
   parameters fail the same way. `error` (which ends the task) is left for a worker that cannot work at all: the

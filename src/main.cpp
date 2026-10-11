@@ -1,4 +1,4 @@
-// main.cpp - nshtestherd: test herd coordinator (server mode) and optional runner (--runner)
+// main.cpp - nshtestherd: test herd coordinator (server mode) and optional runner (-runner)
 
 #include "api.h"
 #include "http.h"
@@ -45,42 +45,42 @@ void Usage()
         "nshtestherd %s - test herd coordinator (server mode) and optional runner\n"
         "\n"
         "Server mode (default):\n"
-        "  nshtestherd [--csv users.csv] [--port 8788] [--bind 127.0.0.1]\n"
+        "  nshtestherd [-csv users.csv] [-port 8788] [-bind 127.0.0.1]\n"
         "\n"
-        "  --bind <ipv4>         listen address (default 127.0.0.1; 0.0.0.0 for remote workers)\n"
-        "  --port <n>            listen port (default 8788)\n"
-        "  --csv <file>          load accounts on startup (FirstName,LastName,Password,Shortname,InternetAddress)\n"
-        "  --generate <n>        no CSV: simulate one with n accounts (load000001 ...); mutually exclusive with --csv.\n"
-        "                        Default without --csv: 100 accounts. --generate 0: start empty, wait for POST /load\n"
-        "  --prefix <name>       generated account prefix (default load)\n"
-        "  --password <pw>       generated account password (default TestPassword)\n"
-        "  --domain <name>       generated mail domain (default example.com)\n"
-        "  --worker-options <s>  options for the workers, returned with every registration (name=value&name, no blanks,\n"
+        "  -bind <ipv4>          listen address (default 127.0.0.1; 0.0.0.0 for remote workers)\n"
+        "  -port <n>             listen port (default 8788)\n"
+        "  -csv <file>           load accounts on startup (FirstName,LastName,Password,Shortname,InternetAddress)\n"
+        "  -generate <n>         no CSV: simulate one with n accounts (load000001 ...); mutually exclusive with -csv.\n"
+        "                        Default without -csv: 100 accounts. -generate 0: start empty, wait for POST /load\n"
+        "  -prefix <name>        generated account prefix (default load)\n"
+        "  -password <pw>        generated account password (default TestPassword)\n"
+        "  -domain <name>        generated mail domain (default example.com)\n"
+        "  -worker-options <s>   options for the workers, returned with every registration (name=value&name, no blanks,\n"
         "                        max 1024); not interpreted here, each worker takes what it knows (domlem: switch)\n"
-        "  --threads <n>         worker threads (default 8)\n"
-        "  --max-csv-bytes <n>   limit for POST /load bodies (default 16777216)\n"
-        "  --timeout <seconds>   socket timeout and request read deadline (default 10)\n"
+        "  -threads <n>          worker threads (default 8)\n"
+        "  -max-csv-bytes <n>    limit for POST /load bodies (default 16777216)\n"
+        "  -timeout <seconds>    socket timeout and request read deadline (default 10)\n"
         "\n"
         "Runner mode (connects to a coordinator over HTTP; may run on any machine):\n"
-        "  nshtestherd --runner --server http://host:8788 --clients 100 [--program exe [-- args...]]\n"
+        "  nshtestherd -runner -server http://host:8788 -clients 100 [-program exe [-- args...]]\n"
         "\n"
-        "  --runner              select runner mode\n"
-        "  --server <url>        coordinator, http://host[:port] (default http://127.0.0.1:8788)\n"
-        "  --clients <n|all>     start exactly n logical clients (max 1000), or 'all' to keep starting clients until\n"
-        "                        every free account is booked (max 1000). Default: up to --max-clients, fewer if the\n"
+        "  -runner               select runner mode\n"
+        "  -server <url>         coordinator, http://host[:port] (default http://127.0.0.1:8788)\n"
+        "  -clients <n|all>      start exactly n logical clients (max 1000), or 'all' to keep starting clients until\n"
+        "                        every free account is booked (max 1000). Default: up to -max-clients, fewer if the\n"
         "                        pool is booked first. One registration and one thread per client.\n"
-        "  --max-clients <n>     limit for the default mode (default 100)\n"
-        "  --program <exe>       run this program once per client and run command (default: built-in dummy job)\n"
+        "  -max-clients <n>      limit for the default mode (default 100)\n"
+        "  -program <exe>        run this program once per client and run command (default: built-in dummy job)\n"
         "  -- <args...>          arguments for every launched program; {NSHTEST_SHORTNAME}, {NSHTEST_TEST_ID}, {NSHTEST_JOB} ...\n"
         "                        are replaced per client (the NSHTEST_* variables are always passed as well)\n"
-        "  --poll-seconds <n>    status polling interval (default 2)\n"
+        "  -poll-seconds <n>     status polling interval (default 2)\n"
         "\n"
         "Smoke test (runs nshtestherd itself as the program; the child prints its pid and NSHTEST_* values):\n"
-        "  nshtestherd --runner --clients 2 --program ./nshtestherd -- --child-info\n"
+        "  nshtestherd -runner -clients 2 -program ./nshtestherd -- -child-info\n"
         "\n"
         "Both modes:\n"
-        "  --verbose             server: log one line per request: method, path, status, test_id (never bodies)\n"
-        "  --version, --help\n"
+        "  -verbose              server: log one line per request: method, path, status, test_id (never bodies)\n"
+        "  -version, -help\n"
         "\n"
         "Environment:\n"
         "  NSHTEST_TOKEN         shared secret (16+ printable characters, no blanks). Server: every call except\n"
@@ -114,17 +114,17 @@ bool ParseNumber(const char *text, long long min, long long max, long long &out)
     return true;
 }
 
-// Accounts generated when neither --csv nor --generate is given: a coordinator works without any option
+// Accounts generated when neither -csv nor -generate is given: a coordinator works without any option
 const size_t DEFAULT_GENERATED_ACCOUNTS = 100;
 
 struct GenerateOptions
 {
     size_t      count    = 0;
-    bool        given    = false; // --generate given (0: start with an empty pool, wait for POST /load)
+    bool        given    = false; // -generate given (0: start with an empty pool, wait for POST /load)
     std::string prefix   = "load";
     std::string password = "TestPassword";
     std::string domain   = "example.com";
-    bool        custom   = false; // --prefix/--password/--domain given
+    bool        custom   = false; // -prefix/-password/-domain given
 };
 
 bool IsNameChars(const std::string &s)
@@ -233,10 +233,10 @@ int RunServer(const ServerConfig &config, const std::string &csvPath, const Gene
         }
 
         std::printf("Generated %zu accounts (%s000001 ...)%s\n", count, gen.prefix.c_str(),
-                    gen.given ? "" : "; the default without --csv/--generate, POST /load can replace them until the first registration");
+                    gen.given ? "" : "; the default without -csv/-generate, POST /load can replace them until the first registration");
     }
     else
-        std::printf("No accounts yet (--generate 0): registrations wait until POST /load\n");
+        std::printf("No accounts yet (-generate 0): registrations wait until POST /load\n");
 
     HttpServer server(config, [&](const HttpRequest &req)
     {
@@ -268,7 +268,7 @@ int RunServer(const ServerConfig &config, const std::string &csvPath, const Gene
     return ok ? 0 : 1;
 }
 
-// Demo/test child for the runner: "nshtestherd --child-info" prints its process id and
+// Demo/test child for the runner: "nshtestherd -child-info" prints its process id and
 // the NSHTEST_* values it was started with (never the password), then exits 0.
 int ChildInfo()
 {
@@ -332,7 +332,7 @@ int main(int argc, char **argv)
     }
 #endif
 
-    if (2 == argc && 0 == std::strcmp(argv[1], "--child-info"))
+    if (2 == argc && (0 == std::strcmp(argv[1], "-child-info") || 0 == std::strcmp(argv[1], "--child-info")))
         return ChildInfo();
 
     ServerConfig config;
@@ -344,27 +344,33 @@ int main(int argc, char **argv)
     bool         serverOpts  = false; // server-only options seen
     bool         runnerOpts  = false; // runner-only options seen
     bool         maxClientsGiven = false;
-    std::string  workerOptions;   // --worker-options: handed to every worker with its registration
+    std::string  workerOptions;   // -worker-options: handed to every worker with its registration
 
     for (int i = 1; i < argc; i++)
     {
         std::string arg = argv[i];
+
+        // The options have one dash (-bind). A double dash (--bind) is read as the same option, so that nothing that calls it breaks;
+        // "--" alone is the separator before the arguments of the program.
+        if (arg.size() > 2 && 0 == arg.compare(0, 2, "--"))
+            arg.erase(0, 1);
+
         const char *value = (i + 1 < argc) ? argv[i + 1] : NULL;
         long long   n = 0;
 
-        if ("--help" == arg || "-h" == arg)
+        if ("-help" == arg || "-h" == arg)
         {
             Usage();
             return 0;
         }
-        else if ("--version" == arg)
+        else if ("-version" == arg)
         {
             std::printf("nshtestherd %s\n", NSHTESTHERD_VERSION);
             return 0;
         }
-        else if ("--verbose" == arg)
+        else if ("-verbose" == arg)
             verbose = true;
-        else if ("--runner" == arg)
+        else if ("-runner" == arg)
             runnerMode = true;
         else if ("--" == arg)
         {
@@ -378,97 +384,97 @@ int main(int argc, char **argv)
             std::fprintf(stderr, "Option requires a value: %s\n", arg.c_str());
             return 2;
         }
-        else if ("--bind" == arg)
+        else if ("-bind" == arg)
         {
             config.bindAddress = argv[++i];
             serverOpts         = true;
         }
-        else if ("--csv" == arg)
+        else if ("-csv" == arg)
         {
             csvPath    = argv[++i];
             serverOpts = true;
         }
-        else if ("--prefix" == arg)
+        else if ("-prefix" == arg)
         {
             gen.prefix = argv[++i];
             gen.custom = serverOpts = true;
         }
-        else if ("--password" == arg)
+        else if ("-password" == arg)
         {
             gen.password = argv[++i];
             gen.custom   = serverOpts = true;
         }
-        else if ("--domain" == arg)
+        else if ("-domain" == arg)
         {
             gen.domain = argv[++i];
             gen.custom = serverOpts = true;
         }
-        else if ("--worker-options" == arg)
+        else if ("-worker-options" == arg)
         {
             workerOptions = argv[++i];
             serverOpts    = true;
         }
-        else if ("--server" == arg)
+        else if ("-server" == arg)
         {
             runner.serverUrl = argv[++i];
             runnerOpts       = true;
         }
-        else if ("--program" == arg)
+        else if ("-program" == arg)
         {
             runner.program = argv[++i];
             runnerOpts     = true;
         }
-        else if ("--port" == arg && ParseNumber(value, 1, 65535, n))
+        else if ("-port" == arg && ParseNumber(value, 1, 65535, n))
         {
             config.port = (int)n;
             serverOpts  = true;
             i++;
         }
-        else if ("--threads" == arg && ParseNumber(value, 1, 256, n))
+        else if ("-threads" == arg && ParseNumber(value, 1, 256, n))
         {
             config.workerThreads = (int)n;
             serverOpts           = true;
             i++;
         }
-        else if ("--max-csv-bytes" == arg && ParseNumber(value, 1, 1LL << 31, n))
+        else if ("-max-csv-bytes" == arg && ParseNumber(value, 1, 1LL << 31, n))
         {
             config.maxCsvBytes = (size_t)n;
             serverOpts         = true;
             i++;
         }
-        else if ("--timeout" == arg && ParseNumber(value, 1, 3600, n))
+        else if ("-timeout" == arg && ParseNumber(value, 1, 3600, n))
         {
             config.timeoutSeconds = (int)n;
             serverOpts            = true;
             i++;
         }
-        else if ("--generate" == arg && ParseNumber(value, 0, 1000000, n))
+        else if ("-generate" == arg && ParseNumber(value, 0, 1000000, n))
         {
             gen.count  = (size_t)n;
             gen.given  = true;
             serverOpts = true;
             i++;
         }
-        else if ("--clients" == arg && "all" == std::string(value))
+        else if ("-clients" == arg && "all" == std::string(value))
         {
             runner.fillAll = true;
             runnerOpts     = true;
             i++;
         }
-        else if ("--clients" == arg && ParseNumber(value, 1, 1000, n))
+        else if ("-clients" == arg && ParseNumber(value, 1, 1000, n))
         {
             runner.clients = (int)n;
             runnerOpts     = true;
             i++;
         }
-        else if ("--max-clients" == arg && ParseNumber(value, 1, 1000, n))
+        else if ("-max-clients" == arg && ParseNumber(value, 1, 1000, n))
         {
             runner.maxClients = (int)n;
             maxClientsGiven   = true;
             runnerOpts        = true;
             i++;
         }
-        else if ("--poll-seconds" == arg && ParseNumber(value, 1, 3600, n))
+        else if ("-poll-seconds" == arg && ParseNumber(value, 1, 3600, n))
         {
             runner.pollMs = (int)n * 1000;
             runnerOpts    = true;
@@ -484,47 +490,47 @@ int main(int argc, char **argv)
 
     if (runnerMode && serverOpts)
     {
-        std::fprintf(stderr, "--bind, --port, --csv, --generate, --prefix, --password, --domain, --worker-options, --threads, --max-csv-bytes and --timeout are server options and cannot be used with --runner\n");
+        std::fprintf(stderr, "-bind, -port, -csv, -generate, -prefix, -password, -domain, -worker-options, -threads, -max-csv-bytes and -timeout are server options and cannot be used with -runner\n");
         return 2;
     }
 
     if (!runnerMode && runnerOpts)
     {
-        std::fprintf(stderr, "--server, --clients, --max-clients, --program, --poll-seconds and -- are runner options; add --runner\n");
+        std::fprintf(stderr, "-server, -clients, -max-clients, -program, -poll-seconds and -- are runner options; add -runner\n");
         return 2;
     }
 
     if (maxClientsGiven && (runner.clients > 0 || runner.fillAll))
     {
-        std::fprintf(stderr, "--max-clients only applies when --clients is not given\n");
+        std::fprintf(stderr, "-max-clients only applies when -clients is not given\n");
         return 2;
     }
 
     if (gen.given && !csvPath.empty())
     {
-        std::fprintf(stderr, "--generate and --csv are mutually exclusive\n");
+        std::fprintf(stderr, "-generate and -csv are mutually exclusive\n");
         return 2;
     }
 
-    // No accounts given: generate the default pool (--generate 0 starts empty on purpose)
+    // No accounts given: generate the default pool (-generate 0 starts empty on purpose)
     if (!runnerMode && csvPath.empty() && !gen.given)
         gen.count = DEFAULT_GENERATED_ACCOUNTS;
 
     if (gen.custom && (!csvPath.empty() || 0 == gen.count))
     {
-        std::fprintf(stderr, "--prefix, --password and --domain apply to generated accounts: not with --csv or --generate 0\n");
+        std::fprintf(stderr, "-prefix, -password and -domain apply to generated accounts: not with -csv or -generate 0\n");
         return 2;
     }
 
     if (gen.count > 0 && (!IsNameChars(gen.prefix) || !IsNameChars(gen.domain) || gen.password.empty()))
     {
-        std::fprintf(stderr, "--prefix and --domain may contain only letters, digits and . _ - ; --password must not be empty\n");
+        std::fprintf(stderr, "-prefix and -domain may contain only letters, digits and . _ - ; -password must not be empty\n");
         return 2;
     }
 
     if (!runner.programArgs.empty() && runner.program.empty())
     {
-        std::fprintf(stderr, "Arguments after -- require --program\n");
+        std::fprintf(stderr, "Arguments after -- require -program\n");
         return 2;
     }
 
@@ -550,7 +556,7 @@ int main(int argc, char **argv)
 
     if (!workerOptions.empty() && (workerOptions.size() > 1024 || !IsTokenChars(workerOptions)))
     {
-        std::fprintf(stderr, "--worker-options must be 1-1024 printable ASCII characters without blanks (name=value&name)\n");
+        std::fprintf(stderr, "-worker-options must be 1-1024 printable ASCII characters without blanks (name=value&name)\n");
         return 2;
     }
 

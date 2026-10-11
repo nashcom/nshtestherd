@@ -85,7 +85,7 @@ static void NameListsEnoughCombinations()
 {
     CHECK(NameCombinations() == FIRST_NAME_COUNT * LAST_NAME_COUNT);
     CHECK(FIRST_NAME_COUNT >= 1000 && LAST_NAME_COUNT >= 1000);
-    CHECK(NameCombinations() >= 1000000); // --generate takes up to 1000000 users
+    CHECK(NameCombinations() >= 1000000); // -generate takes up to 1000000 users
 }
 
 // ---- numbered users -----------------------------------------------------------
@@ -585,10 +585,10 @@ static const TestCase TESTS[] = {
     { "name lists: only letters",                                             NameListsOnlyLetters },
     { "name lists: every name once, ignoring case",                           NameListsUnique },
     { "name lists: at least 10000 combinations",                              NameListsEnoughCombinations },
-    { "numbered users: identical to nshtestherd --generate",                  NumberedLikeNshtestherd },
+    { "numbered users: identical to nshtestherd -generate",                  NumberedLikeNshtestherd },
     { "numbered users: shape of the records",                                 NumberedShape },
     { "numbered users: 7 digits for a list of 1000000",                       NumberedSevenDigitsForAMillion },
-    { "numbered users: prefix, domain, password and --start",                 NumberedPrefixDomainPasswordStart },
+    { "numbered users: prefix, domain, password and -start",                 NumberedPrefixDomainPasswordStart },
     { "numbered users: the number grows past 6 digits",                       NumberedGrowPastSixDigits },
     { "random names: no combination twice",                                   NamesNoCombinationTwice },
     { "random names: short name, address and password",                       NamesShortNameAddressPassword },
@@ -596,8 +596,8 @@ static const TestCase TESTS[] = {
     { "random names: another seed gives another list",                        NamesOtherSeedOtherList },
     { "random names: a small pool can be used up completely",                             NamesTheWholePool },
     { "random names: one more than the pool is refused",                      NamesOneMoreThanThePoolIsRefused },
-    { "random names: --exclude skips the names of an earlier list",            NamesExcludeSkipsAnEarlierList },
-    { "random names: --exclude refuses when too few names are left",         NamesExcludeRefusesWhenTooFewAreLeft },
+    { "random names: -exclude skips the names of an earlier list",            NamesExcludeSkipsAnEarlierList },
+    { "random names: -exclude refuses when too few names are left",         NamesExcludeRefusesWhenTooFewAreLeft },
     { "passwords: length limits 8 to 128",                                    PasswordLengthLimits },
     { "passwords: upper case, lower case, digit, no look-alike letters",      PasswordKindsOfCharacters },
     { "passwords: not repeated",                                              PasswordsAreNotRepeated },
@@ -614,7 +614,7 @@ static const TestCase TESTS[] = {
     { "check: a duplicate address is found",                                  CheckFindsDuplicateAddress },
     { "output file: is created",                                              OutputFileIsCreated },
     { "output file: an existing file is not replaced",                        OutputFileIsNotReplaced },
-    { "output file: --force replaces it",                                     OutputFileIsReplacedWithForce },
+    { "output file: -force replaces it",                                     OutputFileIsReplacedWithForce },
     { "output file: readable for the owner only",                             OutputFileIsForTheOwnerOnly },
 };
 

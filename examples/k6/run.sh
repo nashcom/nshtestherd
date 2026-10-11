@@ -7,7 +7,7 @@
 # Nothing on your machine is changed except Docker containers/networks named nshtestherd-k6-demo-* (removed at the end)
 # and, on first use, the Docker images (nshtestherd:latest is built from this repository).
 #
-# Usage: examples/k6/run.sh [--keep] [--help]
+# Usage: examples/k6/run.sh [-keep] [-help]
 #
 # Settings (environment):
 #   VUS            number of k6 workers                       (default 5)
@@ -19,7 +19,7 @@
 #   HERD_IMAGE     use this nshtestherd image instead of building one,
 #                  for example ghcr.io/nashcom/nshtestherd:latest
 #   K6_IMAGE       k6 image                                   (default grafana/k6:latest)
-#   KEEP=1         (or --keep) leave the coordinator running at the end
+#   KEEP=1         (or -keep) leave the coordinator running at the end
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -256,7 +256,7 @@ start_coordinator()
   docker network create "$NET" >/dev/null || die "cannot create the Docker network"
 
   docker run -d --name "$HERD_C" --network "$NET" --network-alias herd -p "127.0.0.1:$PORT:8788" \
-    "$IMAGE" --bind 0.0.0.0 --generate "$USERS" --verbose >/dev/null || die "cannot start the coordinator"
+    "$IMAGE" -bind 0.0.0.0 -generate "$USERS" -verbose >/dev/null || die "cannot start the coordinator"
 
   local waited=0
 
@@ -422,10 +422,10 @@ k6_summary()
 for arg in "$@"
 do
   case "$arg" in
-    --keep)
+    -keep|--keep)
       KEEP=1
       ;;
-    --help|-h)
+    -help|--help|-h)
       usage
       exit 0
       ;;

@@ -1,7 +1,7 @@
 # nshtestherd protocol (v1)
 
 Everything a worker or an operator can do goes through this HTTP API. All examples use `curl`
-against `http://127.0.0.1:8788` (the default `--bind` / `--port`).
+against `http://127.0.0.1:8788` (the default `-bind` / `-port`).
 
 Contents: [Quick walkthrough](#quick-walkthrough) | [Formats](#formats) | [Endpoints](#endpoints) |
 [Errors](#errors) | [Worker contract](#worker-contract)
@@ -11,7 +11,7 @@ Contents: [Quick walkthrough](#quick-walkthrough) | [Formats](#formats) | [Endpo
 A complete session with two workers. Start the server with three generated accounts:
 
 ```bash
-./nshtestherd --generate 3
+./nshtestherd -generate 3
 ```
 
 **1. Is it up?**
@@ -245,7 +245,7 @@ as before: use that only on a closed test network.
 
 ```bash
 export NSHTEST_TOKEN=$(openssl rand -hex 24)
-./nshtestherd --generate 3
+./nshtestherd -generate 3
 curl -H "Authorization: Bearer $NSHTEST_TOKEN" http://127.0.0.1:8788/status
 ```
 
@@ -269,7 +269,7 @@ steering the herd, not someone who can read the traffic. The runner, domlem and 
 ### POST /load - import accounts
 
 Body: CSV (see the README), `Content-Type: text/csv`. Replaces the pool; allowed only until the first client
-registers. Not needed when the server was started with `--csv` or `--generate`.
+registers. Not needed when the server was started with `-csv` or `-generate`.
 
 ```bash
 curl -X POST -H 'Content-Type: text/csv' --data-binary @examples/users.csv http://127.0.0.1:8788/load
@@ -320,14 +320,14 @@ pause_seconds=0
 worker_options=
 ```
 
-`worker_options` is what the coordinator was started with (`--worker-options`, empty without), the same for every worker
+`worker_options` is what the coordinator was started with (`-worker-options`, empty without), the same for every worker
 and every registration. The coordinator does not interpret it: a worker takes the names it knows and ignores the rest.
 So the protocol can carry options for one kind of worker without the others having to know them. domlem takes
 `switch` (work as the account's own user, unless the Domino server decides otherwise itself); the runner and the
 examples take nothing.
 
 ```bash
-./nshtestherd --worker-options switch
+./nshtestherd -worker-options switch
 ```
 
 When no account can be given:
@@ -343,8 +343,8 @@ error=pool_exhausted
 message=all accounts are allocated
 ```
 
-The other 409 code is `no_accounts_loaded`: the coordinator was started with an empty pool (`--generate 0`) and no
-`POST /load` has brought accounts yet. Without `--csv` or `--generate` it starts with 100 generated accounts.
+The other 409 code is `no_accounts_loaded`: the coordinator was started with an empty pool (`-generate 0`) and no
+`POST /load` has brought accounts yet. Without `-csv` or `-generate` it starts with 100 generated accounts.
 
 ### POST /status - report and poll
 
@@ -618,7 +618,7 @@ state it was in before the pause. A `run` that already completed is not launched
 that finished before the pause was applied, the previous state is `idle`, so resuming leaves it idle and the
 acknowledged `run` command id is not executed a second time. Only a new `command_id` starts new work.
 
-`examples/worker.sh` implements this contract in Bash, and [examples/k6/](../examples/k6/) as a k6 script that runs in the official k6 container. The built-in runner (`nshtestherd --runner`, see the
+`examples/worker.sh` implements this contract in Bash, and [examples/k6/](../examples/k6/) as a k6 script that runs in the official k6 container. The built-in runner (`nshtestherd -runner`, see the
 README) is a worker host that follows the same contract through the public API; it is optional and uses no
 private interface. For external programs it applies each command id once, between child executions, and
 reports a child's result as `ok` (exit 0) or `failed` (anything else), and the client goes back to `idle`. The runner owns status reporting for its

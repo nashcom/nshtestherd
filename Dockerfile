@@ -7,10 +7,10 @@
 # not inline here -- easier to iterate on/test standalone, and it carries the
 # fortify-shim workaround (see that script's own comment).
 #
-# Server:  docker run -p 8788:8788 ghcr.io/nashcom/nshtestherd --bind 0.0.0.0 --generate 100
-# Runner:  docker run ghcr.io/nashcom/nshtestherd --runner --server http://host:8788 --clients 10
-# Users:   docker run --rm --entrypoint /nshtestusers ghcr.io/nashcom/nshtestherd --generate 50 > users.csv
-#          (--program can point at /nshtestherd itself with -- --child-info for a smoke test)
+# Server:  docker run -p 8788:8788 ghcr.io/nashcom/nshtestherd -bind 0.0.0.0 -generate 100
+# Runner:  docker run ghcr.io/nashcom/nshtestherd -runner -server http://host:8788 -clients 10
+# Users:   docker run --rm --entrypoint /nshtestusers ghcr.io/nashcom/nshtestherd -generate 50 > users.csv
+#          (-program can point at /nshtestherd itself with -- -child-info for a smoke test)
 ARG ALPINE_VERSION=latest
 
 FROM alpine:${ALPINE_VERSION} AS build

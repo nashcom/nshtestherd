@@ -242,7 +242,7 @@ static void TestFillCap()
     CHECK(0 == rc);
 }
 
-// The runner starts nshtestherd itself as the child (--child-info prints its pid) and
+// The runner starts nshtestherd itself as the child (-child-info prints its pid) and
 // reports the exit. Skipped if the binary has not been built. Works on Windows too.
 static void TestSelfChild()
 {
@@ -267,7 +267,7 @@ static void TestSelfChild()
 
     RunnerConfig cfg = MakeRunner(1);
     cfg.program      = path;
-    cfg.programArgs  = { "--child-info" };
+    cfg.programArgs  = { "-child-info" };
 
     std::atomic<bool> stop(false);
     int               rc = -1;
@@ -955,7 +955,7 @@ int main()
             "3 clients run, pause and stop; runner finishes with 0 failed");
     RunTest("fill the pool", TestFillPool,
             "4 clients register, the 5th finds no free account (normal end of fill mode); 0 failed");
-    RunTest("client cap (--max-clients)", TestFillCap,
+    RunTest("client cap (-max-clients)", TestFillCap,
             "2 of 4 accounts used, then the limit notice; 0 failed");
     RunTest("runner starts nshtestherd itself as the child", TestSelfChild,
             "a 'child pid=...' line, job finished (exit 0); 0 failed");

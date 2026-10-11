@@ -17,7 +17,7 @@ jobs:
         run: make
 
       - name: Version
-        run: ./nshtestherd --version
+        run: ./nshtestherd -version
 
       # test_core (logic, no sockets) and test_runner (runner against an in-process
       # coordinator on 127.0.0.1:18790, including the self-child test)

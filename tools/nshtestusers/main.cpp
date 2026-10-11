@@ -1,8 +1,8 @@
 // main.cpp - nshtestusers: makes the user CSV for nshtestherd (and nshreg)
 //
-//   nshtestusers --generate 500 --output users.csv
-//   nshtestusers --names --generate 200 --random-passwords --domain lab.example.com --output users.csv
-//   nshtestusers --check users.csv
+//   nshtestusers -generate 500 -output users.csv
+//   nshtestusers -names -generate 200 -random-passwords -domain lab.example.com -output users.csv
+//   nshtestusers -check users.csv
 
 #include "../../src/csv.h"
 #include "gen.h"
@@ -30,31 +30,31 @@ void Usage()
         "\n"
         "Usage: nshtestusers [options]\n"
         "\n"
-        "Numbered users (the same options as nshtestherd --generate):\n"
-        "  --generate <n>          number of users (1-%zu, default 100)\n"
-        "  --prefix <name>         name prefix (default load): load000001\n"
-        "  --start <n>             first number (default 1), to continue an earlier list\n"
-        "  --password <pw>         the password of every user (default TestPassword)\n"
-        "  --domain <name>         mail domain (default example.com)\n"
+        "Numbered users (the same options as nshtestherd -generate):\n"
+        "  -generate <n>           number of users (1-%zu, default 100)\n"
+        "  -prefix <name>          name prefix (default load): load000001\n"
+        "  -start <n>              first number (default 1), to continue an earlier list\n"
+        "  -password <pw>          the password of every user (default TestPassword)\n"
+        "  -domain <name>          mail domain (default example.com)\n"
         "\n"
         "Random unique names (anna.meyer@example.com; every first/last name combination at most once):\n"
-        "  --names                 names instead of numbers; --generate gives the count (up to %zu)\n"
-        "  --seed <n>              the same seed gives the same list (it is printed when not given)\n"
-        "  --exclude <file>        skip the names of an earlier list (a user CSV), so that a second batch does not collide\n"
+        "  -names                  names instead of numbers; -generate gives the count (up to %zu)\n"
+        "  -seed <n>               the same seed gives the same list (it is printed when not given)\n"
+        "  -exclude <file>         skip the names of an earlier list (a user CSV), so that a second batch does not collide\n"
         "\n"
         "Passwords:\n"
-        "  --random-passwords      a different random password for every user (not with --password)\n"
-        "  --password-length <n>   length of the random passwords (8-128, default 16)\n"
+        "  -random-passwords       a different random password for every user (not with -password)\n"
+        "  -password-length <n>    length of the random passwords (8-128, default 16)\n"
         "\n"
         "Output:\n"
-        "  --output <file>         write the file (default: standard output); owner-only access\n"
-        "  --force                 replace an existing output file\n"
-        "  --header                write the header row FirstName,LastName,Password,Shortname,InternetAddress\n"
+        "  -output <file>          write the file (default: standard output); owner-only access\n"
+        "  -force                  replace an existing output file\n"
+        "  -header                 write the header row FirstName,LastName,Password,Shortname,InternetAddress\n"
         "\n"
         "Check:\n"
-        "  --check <file>          validate a user CSV (format, duplicate short names and addresses)\n"
+        "  -check <file>           validate a user CSV (format, duplicate short names and addresses)\n"
         "\n"
-        "  --version, --help\n"
+        "  -version, -help\n"
         "\n"
         "Exit codes: 0 ok, 1 failure (cannot write, check failed), 2 usage error.\n",
         NSHTESTHERD_VERSION, MAX_USERS, NameCombinations());
@@ -182,29 +182,33 @@ int main(int argc, char **argv)
         std::string a = argv[i];
         std::string v;
 
-        // Options with a value: "--name value"
+        // The options have one dash (-generate). A double dash (--generate) is read as the same option, so that nothing that calls it breaks.
+        if (a.size() > 2 && 0 == a.compare(0, 2, "--"))
+            a.erase(0, 1);
+
+        // Options with a value: "-name value"
         const bool hasNext = (i + 1 < argc);
 
-        if ("--help" == a || "-h" == a)
+        if ("-help" == a || "-h" == a)
         {
             Usage();
             return 0;
         }
-        else if ("--version" == a)
+        else if ("-version" == a)
         {
             std::printf("nshtestusers %s\n", NSHTESTHERD_VERSION);
             return 0;
         }
-        else if ("--names" == a)
+        else if ("-names" == a)
             names = true;
-        else if ("--random-passwords" == a)
+        else if ("-random-passwords" == a)
             randomPasswords = true;
-        else if ("--header" == a)
+        else if ("-header" == a)
             header = true;
-        else if ("--force" == a)
+        else if ("-force" == a)
             force = true;
-        else if (("--generate" == a || "--prefix" == a || "--start" == a || "--password" == a || "--domain" == a || "--seed" == a ||
-                  "--password-length" == a || "--output" == a || "--check" == a || "--exclude" == a))
+        else if (("-generate" == a || "-prefix" == a || "-start" == a || "-password" == a || "-domain" == a || "-seed" == a ||
+                  "-password-length" == a || "-output" == a || "-check" == a || "-exclude" == a))
         {
             if (!hasNext)
                 return Fail(a + " needs a value", 2);
@@ -213,78 +217,78 @@ int main(int argc, char **argv)
 
             size_t n = 0;
 
-            if ("--generate" == a)
+            if ("-generate" == a)
             {
                 if (!ParseNumber(v, n) || n < 1 || n > MAX_USERS)
-                    return Fail("--generate must be 1 to " + std::to_string(MAX_USERS), 2);
+                    return Fail("-generate must be 1 to " + std::to_string(MAX_USERS), 2);
                 numbered.count = n;
             }
-            else if ("--start" == a)
+            else if ("-start" == a)
             {
                 if (!ParseNumber(v, n) || n < 1)
-                    return Fail("--start must be a number from 1", 2);
+                    return Fail("-start must be a number from 1", 2);
                 numbered.start = n;
             }
-            else if ("--seed" == a)
+            else if ("-seed" == a)
             {
                 if (!ParseNumber(v, n))
-                    return Fail("--seed must be a number", 2);
+                    return Fail("-seed must be a number", 2);
                 seedValue = n;
                 seedGiven = true;
             }
-            else if ("--password-length" == a)
+            else if ("-password-length" == a)
             {
                 if (!ParseNumber(v, n) || n < 8 || n > 128)
-                    return Fail("--password-length must be 8 to 128", 2);
+                    return Fail("-password-length must be 8 to 128", 2);
                 passwordLength = n;
             }
-            else if ("--prefix" == a)
+            else if ("-prefix" == a)
             {
                 if (!ValidName(v, false))
-                    return Fail("--prefix may only have letters, digits, - and _", 2);
+                    return Fail("-prefix may only have letters, digits, - and _", 2);
                 numbered.prefix = v;
             }
-            else if ("--domain" == a)
+            else if ("-domain" == a)
             {
                 if (!ValidName(v, true) || '.' == v[0] || '.' == v[v.size() - 1])
-                    return Fail("--domain may only have letters, digits, - _ and dots, and not start or end with a dot", 2);
+                    return Fail("-domain may only have letters, digits, - _ and dots, and not start or end with a dot", 2);
                 numbered.domain = v;
             }
-            else if ("--password" == a)
+            else if ("-password" == a)
             {
                 if (v.empty())
-                    return Fail("--password must not be empty", 2);
+                    return Fail("-password must not be empty", 2);
                 numbered.password = v;
                 passwordGiven     = true;
             }
-            else if ("--output" == a || "--check" == a || "--exclude" == a)
+            else if ("-output" == a || "-check" == a || "-exclude" == a)
             {
-                if (v.empty() || (v.size() > 1 && 0 == v.compare(0, 2, "--")))
+                if (v.empty() || (v.size() > 1 && '-' == v[0]))
                     return Fail(a + " needs a file name", 2);
 
-                if ("--output" == a)
+                if ("-output" == a)
                     output = v;
-                else if ("--check" == a)
+                else if ("-check" == a)
                     checkPath = v;
                 else
                     excludePath = v;
             }
         }
         else
-            return Fail("unknown option " + a + " (see --help)", 2);
+            return Fail("unknown option " + a + " (see -help)", 2);
     }
 
     if (!checkPath.empty())
         return CheckFile(checkPath);
 
     if (randomPasswords && passwordGiven)
-        return Fail("--random-passwords and --password exclude each other", 2);
+        return Fail("-random-passwords and -password exclude each other", 2);
 
     std::vector<UserRecord> users;
     std::string             err;
 
     if (!excludePath.empty() && !names)
-        return Fail("--exclude is for --names (numbered lists continue with --start)", 2);
+        return Fail("-exclude is for -names (numbered lists continue with -start)", 2);
 
     std::set<std::string> exclude;
 
@@ -310,7 +314,7 @@ int main(int argc, char **argv)
             return Fail(err, 2);
 
         if (!seedGiven)
-            std::fprintf(stderr, "nshtestusers: seed %llu (--seed gives the same list again)\n", (unsigned long long)seedValue);
+            std::fprintf(stderr, "nshtestusers: seed %llu (-seed gives the same list again)\n", (unsigned long long)seedValue);
     }
     else
         users = NumberedUsers(numbered);

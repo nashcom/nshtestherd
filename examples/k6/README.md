@@ -53,7 +53,7 @@ a coordinator you run yourself, except that it needs its port free (`PORT=8800 e
 
 ```bash
 VUS=20 RUN_SECONDS=30 examples/k6/run.sh
-examples/k6/run.sh --keep        # leave the coordinator running afterwards, to look around
+examples/k6/run.sh -keep         # leave the coordinator running afterwards, to look around
 ```
 
 The sections below explain the pieces, if you want to run them yourself.
@@ -115,7 +115,7 @@ Coordinator on the same machine, not in the Compose stack? On Linux add `--netwo
 - **Linux:** a package or a binary, see the [k6 install guide](https://grafana.com/docs/k6/latest/set-up/install-k6/)
 - **Any system with Docker:** nothing to install, see options 1 and 2
 
-Then, with a coordinator running (`./nshtestherd --generate 20`):
+Then, with a coordinator running (`./nshtestherd -generate 20`):
 
 ```bash
 k6 run examples/k6/herd-worker.js
@@ -180,6 +180,6 @@ object body as a form (`application/x-www-form-urlencoded`), which is what the A
 | `connection refused` / `no such host` | Wrong `HERD_URL`, coordinator down, or k6 is in another Docker network   |
 | Compose: network not found            | Start the repository's stack first, or set `HERD_NETWORK` (see Settings) |
 | 409 `pool_exhausted`                  | More workers than free accounts: lower `VUS` or restart the coordinator  |
-| 409 `no_accounts_loaded`              | The coordinator has no accounts: start it with `--generate N` or `--csv` |
+| 409 `no_accounts_loaded`              | The coordinator has no accounts: start it with `-generate N` or `-csv`   |
 | Workers register but do nothing       | By design: send the `run` command                                        |
 | k6 ends after a few minutes           | That is `DURATION` (default 5 minutes): raise it                         |
